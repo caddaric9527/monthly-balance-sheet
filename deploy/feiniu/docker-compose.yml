@@ -1,0 +1,35 @@
+# 飞牛 NAS（fnOS）专用 compose
+#
+# 用法一（推荐，源码已在 NAS 上）：把本文件复制到项目根目录，重命名为 docker-compose.yml，
+#   然后 docker compose up -d --build
+#
+# 用法二（飞牛 Docker 网页端「项目 → 新建」）：整段粘贴后，
+#   删掉 build: 下的三行（网页端无法定位构建上下文，需先用 install.sh 构建过镜像）
+#
+# 把下面的 /vol1/1000/docker 换成你自己的存储空间路径（飞牛「文件管理」里能看到实际路径）
+
+services:
+  balance:
+    image: monthly-balance-sheet:2.0.0
+    build:
+      context: ../..
+      args:
+        NODE_IMAGE: node:22-bookworm-slim
+        NPM_REGISTRY: https://registry.npmjs.org
+    container_name: balance
+    restart: unless-stopped
+    ports:
+      - "8899:8080"
+    volumes:
+      - /vol1/1000/docker/monthly-balance-sheet/data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=8080
+      - AUTH_PASSWORD=改成你自己的密码
+      - AUTH_DAYS=30
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      start_period: 20s
+      retries: 3

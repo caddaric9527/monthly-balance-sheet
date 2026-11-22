@@ -1,17 +1,28 @@
 services:
   balance:
-    image: monthly-balance-sheet:2.0.0
-    build: .
-    container_name: balance
+    image: monthly-balance-sheet:${APP_VERSION:-2.0.0}
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    container_name: ${CONTAINER_NAME:-balance}
     restart: unless-stopped
     ports:
       - "${HOST_PORT:-8899}:8080"
     volumes:
-      - ./data:/app/data                 # 现金、负债、投资组合全部存在这里
+      # 现金、负债、投资组合全部存在这个目录，备份直接拷它
+      - ${HOST_DATA_DIR:-./data}:/app/data
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=${TZ:-Asia/Shanghai}
       - PORT=8080
       - AUTH_PASSWORD=${AUTH_PASSWORD:-}
       - AUTH_DAYS=${AUTH_DAYS:-30}
       - FX_USD_CNY=${FX_USD_CNY:-}
       - FX_HKD_CNY=${FX_HKD_CNY:-}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
