@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 语法检查 + 冒烟测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 语法检查
+        run: |
+          set -e
+          for f in server/*.js public/app.js scripts/*.mjs; do
+            node --check "$f"
+            echo "ok  $f"
+          done
+
+      - name: 冒烟测试
+        run: npm run smoke
+
+  docker:
+    name: 镜像构建
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -t monthly-balance-sheet:ci .
