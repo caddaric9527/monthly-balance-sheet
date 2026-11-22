@@ -16,7 +16,7 @@ services:
       args:
         NODE_IMAGE: node:22-bookworm-slim
         NPM_REGISTRY: https://registry.npmjs.org
-    container_name: balance
+    container_name: monthly-balance
     restart: unless-stopped
     ports:
       - "8899:8080"

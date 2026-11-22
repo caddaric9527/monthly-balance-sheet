@@ -7,7 +7,7 @@
 set -euo pipefail
 
 APP_NAME="monthly-balance-sheet"
-CONTAINER_NAME="balance"
+CONTAINER_NAME="monthly-balance"
 REPO_URL="${REPO_URL:-https://github.com/caddaric9527/monthly-balance-sheet.git}"
 REPO_TARBALL="${REPO_TARBALL:-https://codeload.github.com/caddaric9527/monthly-balance-sheet/tar.gz/refs/heads/main}"
 APP_VERSION="${APP_VERSION:-2.0.0}"
