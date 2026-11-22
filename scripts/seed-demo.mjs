@@ -1,7 +1,7 @@
 /**
  * 生成演示数据（用于本地预览 / 截图）。
  * 用法：node scripts/seed-demo.mjs http://127.0.0.1:8911
- * 注意：会清空目标服务里已有的账户、月报数据，只在测试环境使用。
+ * 注意：会清空目标服务里已有的账户、月报、投资组合，只在测试环境使用。
  */
 const BASE = (process.argv[2] || 'http://127.0.0.1:8911').replace(/\/+$/, '');
 
@@ -16,12 +16,22 @@ const call = async (path, method = 'GET', body) => {
   return data;
 };
 
+const round = (v) => Math.round(v * 100) / 100;
+const USD = 7.1;
+
 const ACCOUNTS = [
   { name: '招商银行 · 工资卡', kind: 'bank', currency: 'CNY', note: '主要收付账户' },
   { name: '支付宝 · 余额宝', kind: 'alipay', currency: 'CNY', note: '日常零花 + 货基' },
   { name: '微信零钱', kind: 'wechat', currency: 'CNY', note: '' },
   { name: '券商 · 现金理财', kind: 'broker', currency: 'CNY', note: '未买仓位的钱' },
   { name: '汇丰 · 美元活期', kind: 'bank', currency: 'USD', note: '美元备用金' },
+];
+
+// 组合定义：占比用于把月度总市值拆到各组合
+const PORTFOLIOS = [
+  { name: '稳健核心 + 科技成长', currency: 'USD', share: 0.55, allocation: 'VOO 40% + QQQ 30% + BND 30%', dcaPlan: '每月 2000 美元' },
+  { name: '杠杆成长 + 黄金对冲', currency: 'USD', share: 0.3, allocation: 'TQQQ 50% + GLD 50%', dcaPlan: '每月 800 美元' },
+  { name: '加密多元配置', currency: 'USD', share: 0.15, allocation: 'BTC 60% + ETH 40%', dcaPlan: '每月 500 美元' },
 ];
 
 const MONTHS = [
@@ -34,72 +44,58 @@ const MONTHS = [
 ];
 
 const run = async () => {
+  // 清空旧数据
   const existing = await call('/accounts', 'GET');
   for (const a of existing) await call(`/accounts/${a.id}?purge=1`, 'DELETE');
   const old = await call('/months');
   for (const row of old.months) await call(`/snapshot/${row.month}`, 'DELETE');
+  const oldPf = await call('/portfolios');
+  for (const p of oldPf.portfolios || []) await call(`/portfolios/${p.id}?purge=1`, 'DELETE');
 
-  const ids = [];
+  // 固定汇率，让演示数字稳定
+  await call('/config', 'PATCH', { fx_source: 'manual', fx_usd_cny: USD, fx_hkd_cny: 0.92 });
+
+  const accountIds = [];
   for (const a of ACCOUNTS) {
     const r = await call('/accounts', 'POST', a);
-    ids.push(r.id);
+    accountIds.push(r.id);
+  }
+
+  const pfIds = [];
+  for (const p of PORTFOLIOS) {
+    const r = await call('/portfolios', 'POST', {
+      name: p.name,
+      currency: p.currency,
+      allocation: p.allocation,
+      dcaPlan: p.dcaPlan,
+    });
+    pfIds.push(r.id);
   }
 
   for (const row of MONTHS) {
-    const cash = ids.map((id, i) => ({ accountId: id, balance: row.cash[i] ?? 0 }));
+    for (let i = 0; i < PORTFOLIOS.length; i += 1) {
+      const p = PORTFOLIOS[i];
+      await call(`/portfolios/${pfIds[i]}/records`, 'POST', {
+        month: row.m,
+        invested: round((row.cost * p.share) / USD),
+        value: round((row.inv * p.share) / USD),
+        note: i === 0 && row.m === '2026-10' ? '定投追加' : '',
+      });
+    }
+    const cash = accountIds.map((id, i) => ({ accountId: id, balance: row.cash[i] ?? 0 }));
     const liabilities = row.liab
       ? [{ name: '招行信用卡', kind: 'credit', amount: row.liab, currency: 'CNY' }]
       : [];
-    await call(`/snapshot/${row.m}`, 'PUT', {
-      cash,
-      liabilities,
-      investment: {
-        valueCny: row.inv,
-        investedCny: row.cost,
-        source: 'manual',
-        detail: [
-          {
-            name: '组合一：稳健核心+科技成长',
-            currency: 'USD',
-            month: row.m,
-            exact: true,
-            value: Math.round(row.inv * 0.55) / 7.1,
-            invested: Math.round(row.cost * 0.55) / 7.1,
-            valueCny: Math.round(row.inv * 0.55),
-            investedCny: Math.round(row.cost * 0.55),
-          },
-          {
-            name: '组合二：杠杆成长+黄金对冲',
-            currency: 'USD',
-            month: row.m,
-            exact: true,
-            value: Math.round(row.inv * 0.3) / 7.1,
-            invested: Math.round(row.cost * 0.3) / 7.1,
-            valueCny: Math.round(row.inv * 0.3),
-            investedCny: Math.round(row.cost * 0.3),
-          },
-          {
-            name: '组合三：加密多元配置',
-            currency: 'USD',
-            month: row.m,
-            exact: true,
-            value: Math.round(row.inv * 0.15) / 7.1,
-            invested: Math.round(row.cost * 0.15) / 7.1,
-            valueCny: Math.round(row.inv * 0.15),
-            investedCny: Math.round(row.cost * 0.15),
-          },
-        ],
-      },
-      note: row.note,
-      confirmed: true,
-    });
+    await call(`/snapshot/${row.m}`, 'PUT', { cash, liabilities, note: row.note, confirmed: true });
   }
 
   const months = await call('/months');
+  const ov = await call('/portfolios');
   console.log(`演示数据已写入 ${BASE}`);
   for (const m of months.months) {
     console.log(`  ${m.month}  现金 ${m.cash}  理财 ${m.invest}  负债 ${m.liabilities}  净资产 ${m.net}`);
   }
+  console.log(`  持仓：${ov.portfolios.length} 个组合，市值 ${ov.summary.value}，收益率 ${ov.summary.returnPct}%`);
 };
 
 run().catch((e) => {

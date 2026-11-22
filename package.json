@@ -1,10 +1,10 @@
 {
   "name": "monthly-balance-sheet",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "月度个人资产负债表：现金分账户 + 理财自动同步 + 负债，月末一次录入",
+  "description": "月度个人资产负债表：现金分账户 + 内置投资组合持仓 + 负债，月末一次录入",
   "engines": {
     "node": ">=20"
   },

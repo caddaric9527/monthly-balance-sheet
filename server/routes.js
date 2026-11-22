@@ -1,7 +1,18 @@
 import { Router } from 'express';
-import { db, getConfig, setSettings, getSettings } from './db.js';
+import { db, getConfig, setSettings } from './db.js';
 import { fetchFx, round2 } from './fx.js';
-import { syncPortfolio, testConnection, isMonth } from './sync.js';
+import {
+  CURRENCIES,
+  isMonth,
+  getPortfolio,
+  deletePortfolioRecords,
+  investmentForMonth,
+  portfolioOverview,
+  cacheInvestment,
+  upsertRecord,
+  portfolioMonths,
+  todayMonth,
+} from './portfolio.js';
 
 export const api = Router();
 
@@ -11,15 +22,13 @@ const num = (v, d = 0) => {
   return Number.isFinite(n) ? n : d;
 };
 const fail = (msg, status = 400) => Object.assign(new Error(msg), { status });
-const thisMonth = () => new Date().toLocaleDateString('sv-SE').slice(0, 7);
-const CURRENCIES = ['CNY', 'USD', 'HKD'];
 const KINDS = ['bank', 'alipay', 'wechat', 'cash', 'broker', 'other'];
 const LIAB_KINDS = ['credit', 'loan', 'borrow', 'other'];
 
 /* ---------------- 基础工具 ---------------- */
 
 const getSnapshotRow = (month) => db.prepare('SELECT * FROM snapshots WHERE month = ?').get(month);
-const getInvestment = (month) => {
+const getInvestmentRow = (month) => {
   const row = db.prepare('SELECT * FROM investments WHERE month = ?').get(month);
   if (!row) return null;
   let detail = [];
@@ -39,22 +48,45 @@ function fxFor(month, cfg) {
   return { usd, hkd, toCny: (cur) => (cur === 'USD' ? usd : cur === 'HKD' ? hkd : 1) };
 }
 
+/**
+ * 某月的理财市值。
+ * 优先级：内置持仓记录（自动算出）> 该月手动/历史缓存值 > 0
+ */
+function investmentOf(month, fx) {
+  const auto = investmentForMonth(month, fx);
+  if (auto.detail.length) return { ...auto, manual: false };
+  const row = getInvestmentRow(month);
+  if (row) {
+    return {
+      source: 'manual',
+      hasPortfolios: auto.hasPortfolios,
+      valueCny: round2(row.value_cny),
+      investedCny: round2(row.invested_cny),
+      detail: row.detail,
+      partial: false,
+      warnings: auto.warnings,
+      manual: true,
+      syncedAt: row.synced_at,
+      note: row.note || '',
+    };
+  }
+  return { ...auto, manual: false };
+}
+
 /** 某月的全部汇总 */
 function monthTotals(month, cfg = getConfig()) {
   const fx = fxFor(month, cfg);
   const cashRows = db
-    .prepare(
-      `SELECT e.balance, a.currency FROM entries e JOIN accounts a ON a.id = e.account_id WHERE e.month = ?`,
-    )
+    .prepare(`SELECT e.balance, a.currency FROM entries e JOIN accounts a ON a.id = e.account_id WHERE e.month = ?`)
     .all(month);
   const cash = round2(cashRows.reduce((s, r) => s + num(r.balance) * fx.toCny(r.currency), 0));
 
   const liabRows = db.prepare('SELECT amount, currency FROM liabilities WHERE month = ?').all(month);
   const liabilities = round2(liabRows.reduce((s, r) => s + num(r.amount) * fx.toCny(r.currency), 0));
 
-  const inv = getInvestment(month);
-  const invest = round2(inv?.value_cny || 0);
-  const investInvested = round2(inv?.invested_cny || 0);
+  const inv = investmentOf(month, fx);
+  const invest = round2(inv.valueCny || 0);
+  const investInvested = round2(inv.investedCny || 0);
   const assets = round2(cash + invest);
   const net = round2(assets - liabilities);
 
@@ -71,7 +103,7 @@ function monthTotals(month, cfg = getConfig()) {
     cashShare: assets > 0 ? round2((cash / assets) * 100) : null,
     investShare: assets > 0 ? round2((invest / assets) * 100) : null,
     liabilityRatio: assets > 0 ? round2((liabilities / assets) * 100) : null,
-    hasInvestment: Boolean(inv),
+    hasInvestment: Boolean(inv.detail.length || inv.manual),
   };
 }
 
@@ -96,8 +128,6 @@ const prevMonthOf = (month) => {
 
 function withChange(cur, prev) {
   const mk = (k) => (prev ? round2(cur[k] - prev[k]) : null);
-  const pct = (k) =>
-    prev && Math.abs(prev[k]) > 0.004 ? round2(((cur[k] - prev[k]) / Math.abs(prev[k])) * 100) : null;
   const base = prev ? round2(cur.net - prev.net) : null;
   const basePrev = prev ? prev.net : 0;
   return {
@@ -125,9 +155,7 @@ api.get('/health', (_req, res) => {
 
 function accountList({ includeArchived = false } = {}) {
   const rows = db
-    .prepare(
-      `SELECT * FROM accounts ${includeArchived ? '' : 'WHERE archived = 0'} ORDER BY sort_order, id`,
-    )
+    .prepare(`SELECT * FROM accounts ${includeArchived ? '' : 'WHERE archived = 0'} ORDER BY sort_order, id`)
     .all();
   const latest = db
     .prepare(
@@ -199,6 +227,143 @@ api.delete('/accounts/:id', wrap(async (req, res) => {
   res.json({ ok: true, archived: true, accounts: accountList() });
 }));
 
+/* ---------------- 投资组合（内置持仓管理） ---------------- */
+
+const pfPayload = (b, base = {}) => ({
+  name: b.name === undefined ? base.name : String(b.name || '').trim(),
+  allocation: b.allocation === undefined ? base.allocation || '' : String(b.allocation || '').slice(0, 200),
+  dcaPlan: b.dcaPlan === undefined ? base.dcaPlan || '' : String(b.dcaPlan || '').slice(0, 200),
+  currency:
+    b.currency === undefined
+      ? base.currency || 'USD'
+      : CURRENCIES.includes(b.currency)
+        ? b.currency
+        : base.currency || 'USD',
+  sortOrder: b.sortOrder === undefined ? base.sortOrder || 0 : num(b.sortOrder, 0),
+});
+
+/** 组合变动后，把受影响月份的缓存刷新一遍（只刷有月报的月份） */
+function refreshCachedInvestments(months) {
+  const cfg = getConfig();
+  for (const m of months) {
+    if (!isMonth(m)) continue;
+    if (!getSnapshotRow(m)) continue;
+    const fx = fxFor(m, cfg);
+    const auto = investmentForMonth(m, fx);
+    if (auto.detail.length) cacheInvestment(m, fx);
+    else db.prepare('DELETE FROM investments WHERE month = ?').run(m);
+  }
+}
+
+api.get('/portfolios', wrap(async (_req, res) => {
+  const cfg = getConfig();
+  const fx = fxFor(todayMonth(), cfg);
+  res.json({ ...portfolioOverview(fx), fx: { usd: round2(fx.usd), hkd: round2(fx.hkd), source: cfg.fx_source } });
+}));
+
+api.post('/portfolios', wrap(async (req, res) => {
+  const p = pfPayload(req.body || {});
+  if (!p.name) throw fail('组合名称不能为空');
+  if (p.name.length > 60) throw fail('组合名称过长（最多 60 字）');
+  const info = db
+    .prepare(
+      'INSERT INTO portfolios (name, allocation, dca_plan, currency, sort_order, archived, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
+    )
+    .run(p.name, p.allocation, p.dcaPlan, p.currency, p.sortOrder, new Date().toISOString());
+  res.status(201).json({ ok: true, id: info.lastInsertRowid });
+}));
+
+api.patch('/portfolios/:id', wrap(async (req, res) => {
+  const pf = getPortfolio(req.params.id);
+  if (!pf) throw fail('组合不存在', 404);
+  const b = req.body || {};
+  const p = pfPayload(b, {
+    name: pf.name,
+    allocation: pf.allocation,
+    dcaPlan: pf.dca_plan,
+    currency: pf.currency,
+    sortOrder: pf.sort_order,
+  });
+  if (!p.name) throw fail('组合名称不能为空');
+  db.prepare(
+    'UPDATE portfolios SET name = ?, allocation = ?, dca_plan = ?, currency = ?, sort_order = ?, archived = ? WHERE id = ?',
+  ).run(
+    p.name.slice(0, 60),
+    p.allocation,
+    p.dcaPlan,
+    p.currency,
+    p.sortOrder,
+    b.archived === undefined ? pf.archived : b.archived ? 1 : 0,
+    pf.id,
+  );
+  // 改了币种会影响折算，刷新缓存
+  refreshCachedInvestments(portfolioMonths());
+  res.json({ ok: true });
+}));
+
+api.delete('/portfolios/:id', wrap(async (req, res) => {
+  const pf = getPortfolio(req.params.id);
+  if (!pf) throw fail('组合不存在', 404);
+  const months = portfolioMonths();
+  if (req.query.purge === '1') {
+    db.transaction(() => {
+      deletePortfolioRecords(pf.id);
+      db.prepare('DELETE FROM portfolios WHERE id = ?').run(pf.id);
+    })();
+    refreshCachedInvestments(months);
+    return res.json({ ok: true, purged: true });
+  }
+  db.prepare('UPDATE portfolios SET archived = 1 WHERE id = ?').run(pf.id);
+  refreshCachedInvestments(months);
+  res.json({ ok: true, archived: true });
+}));
+
+api.post('/portfolios/:id/records', wrap(async (req, res) => {
+  const pf = getPortfolio(req.params.id);
+  if (!pf) throw fail('组合不存在', 404);
+  const b = req.body || {};
+  const month = b.month === undefined ? todayMonth() : String(b.month);
+  if (!isMonth(month)) throw fail('月份格式须为 YYYY-MM');
+  const invested = Number(b.invested);
+  const value = Number(b.value);
+  if (!Number.isFinite(invested) || invested < 0) throw fail('投入本金须为不小于 0 的数字');
+  if (!Number.isFinite(value) || value < 0) throw fail('当前市值须为不小于 0 的数字');
+  upsertRecord({ portfolioId: pf.id, month, invested, value, note: b.note });
+  refreshCachedInvestments([month]);
+  res.status(201).json({ ok: true, month });
+}));
+
+api.delete('/records/:id', wrap(async (req, res) => {
+  const r = db.prepare('SELECT * FROM portfolio_records WHERE id = ?').get(num(req.params.id));
+  if (!r) throw fail('记录不存在', 404);
+  db.prepare('DELETE FROM portfolio_records WHERE id = ?').run(r.id);
+  refreshCachedInvestments([r.month]);
+  res.json({ ok: true });
+}));
+
+/** 一次性批量录入某月所有组合的市值（持仓页的快捷录入） */
+api.post('/records/bulk', wrap(async (req, res) => {
+  const b = req.body || {};
+  const month = b.month === undefined ? todayMonth() : String(b.month);
+  if (!isMonth(month)) throw fail('月份格式须为 YYYY-MM');
+  const rows = Array.isArray(b.records) ? b.records : [];
+  if (!rows.length) throw fail('没有要保存的记录');
+  let saved = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      const pf = getPortfolio(r.portfolioId);
+      if (!pf) continue;
+      const invested = num(r.invested, 0);
+      const value = num(r.value, 0);
+      if (invested < 0 || value < 0) continue;
+      upsertRecord({ portfolioId: pf.id, month, invested: invested, value: value, note: r.note });
+      saved += 1;
+    }
+  })();
+  refreshCachedInvestments([month]);
+  res.json({ ok: true, month, saved });
+}));
+
 /* ---------------- 月度快照 ---------------- */
 
 function buildSnapshot(month) {
@@ -236,32 +401,34 @@ function buildSnapshot(month) {
     .all(month)
     .map((r) => ({ ...r, amountCny: round2(num(r.amount) * fx.toCny(r.currency)) }));
 
-  const inv = getInvestment(month);
+  const inv = investmentOf(month, fx);
   const totals = monthTotals(month, cfg);
   const prevTotals = prev ? monthTotals(prev, cfg) : null;
 
   return {
     month,
-    exists: Boolean(snap) || cash.some((c) => c.saved) || liabilities.length > 0 || Boolean(inv),
+    exists:
+      Boolean(snap) || cash.some((c) => c.saved) || liabilities.length > 0 || Boolean(inv.detail.length || inv.manual),
     meta: {
       confirmed: Boolean(snap?.confirmed),
       note: snap?.note || '',
       updatedAt: snap?.updated_at || null,
       hasSnapshotRow: Boolean(snap),
     },
-    fx: { usd: round2(fx.usd * 100) / 100, hkd: round2(fx.hkd * 100) / 100, source: cfg.fx_source },
+    fx: { usd: round2(fx.usd), hkd: round2(fx.hkd), source: cfg.fx_source },
     cash,
     liabilities,
-    investment: inv
-      ? {
-          valueCny: round2(inv.value_cny),
-          investedCny: round2(inv.invested_cny),
-          source: inv.source,
-          detail: inv.detail,
-          syncedAt: inv.synced_at,
-          note: inv.note || '',
-        }
-      : { valueCny: 0, investedCny: 0, source: null, detail: [], syncedAt: null, note: '' },
+    investment: {
+      valueCny: round2(inv.valueCny || 0),
+      investedCny: round2(inv.investedCny || 0),
+      source: inv.detail.length ? 'portfolio' : inv.manual ? 'manual' : null,
+      manual: Boolean(inv.manual),
+      partial: Boolean(inv.partial),
+      warnings: inv.warnings || [],
+      detail: inv.detail || [],
+      syncedAt: inv.syncedAt || null,
+      note: inv.note || '',
+    },
     totals,
     prev: prev ? { month: prev, totals: prevTotals } : null,
     change: withChange(totals, prevTotals),
@@ -272,15 +439,9 @@ api.get('/months', wrap(async (_req, res) => {
   const cfg = getConfig();
   const out = allMonths().map((m) => {
     const snap = getSnapshotRow(m);
-    const inv = getInvestment(m);
-    return {
-      month: m,
-      confirmed: Boolean(snap?.confirmed),
-      hasInvestment: Boolean(inv),
-      ...monthTotals(m, cfg),
-    };
+    return { month: m, confirmed: Boolean(snap?.confirmed), ...monthTotals(m, cfg) };
   });
-  res.json({ months: out, currentMonth: thisMonth(), portfolioMode: cfg.portfolio_mode });
+  res.json({ months: out, currentMonth: todayMonth() });
 }));
 
 api.get('/snapshot/:month', wrap(async (req, res) => {
@@ -307,7 +468,9 @@ api.put('/snapshot/:month', wrap(async (req, res) => {
   db.transaction(() => {
     const exists = getSnapshotRow(month);
     if (exists) {
-      db.prepare('UPDATE snapshots SET note = ?, confirmed = ?, fx_usd = ?, fx_hkd = ?, updated_at = ? WHERE month = ?').run(
+      db.prepare(
+        'UPDATE snapshots SET note = ?, confirmed = ?, fx_usd = ?, fx_hkd = ?, updated_at = ? WHERE month = ?',
+      ).run(
         String(b.note ?? exists.note ?? '').slice(0, 300),
         b.confirmed === undefined ? exists.confirmed : b.confirmed ? 1 : 0,
         fxUsd,
@@ -333,7 +496,9 @@ api.put('/snapshot/:month', wrap(async (req, res) => {
       keep.add(id);
     }
     for (const row of db.prepare('SELECT account_id FROM entries WHERE month = ?').all(month)) {
-      if (!keep.has(row.account_id)) db.prepare('DELETE FROM entries WHERE month = ? AND account_id = ?').run(month, row.account_id);
+      if (!keep.has(row.account_id)) {
+        db.prepare('DELETE FROM entries WHERE month = ? AND account_id = ?').run(month, row.account_id);
+      }
     }
 
     db.prepare('DELETE FROM liabilities WHERE month = ?').run(month);
@@ -354,24 +519,25 @@ api.put('/snapshot/:month', wrap(async (req, res) => {
       );
     }
 
-    if (b.investment && b.investment.valueCny !== undefined && b.investment.valueCny !== null) {
-      const iv = b.investment;
+    // 理财：有持仓记录就自动算并缓存，没有才接受手动填的值
+    const fx = { usd: fxUsd, hkd: fxHkd, toCny: (cur) => (cur === 'USD' ? fxUsd : cur === 'HKD' ? fxHkd : 1) };
+    const auto = investmentForMonth(month, fx);
+    if (auto.detail.length) {
+      cacheInvestment(month, fx, { note: b.investment?.note });
+    } else if (b.investment && (b.investment.valueCny !== undefined || b.investment.investedCny !== undefined)) {
       db.prepare(
         `INSERT INTO investments (month, value_cny, invested_cny, source, detail, synced_at, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, 'manual', '[]', ?, ?)
          ON CONFLICT(month) DO UPDATE SET value_cny = excluded.value_cny, invested_cny = excluded.invested_cny,
-           source = excluded.source, detail = excluded.detail, synced_at = excluded.synced_at, note = excluded.note`,
+           source = 'manual', detail = '[]', synced_at = excluded.synced_at, note = excluded.note`,
       ).run(
         month,
-        Math.max(0, num(iv.valueCny)),
-        Math.max(0, num(iv.investedCny)),
-        ['manual', 'api', 'db'].includes(iv.source) ? iv.source : 'manual',
-        JSON.stringify(Array.isArray(iv.detail) ? iv.detail.slice(0, 50) : []),
-        iv.syncedAt || now,
-        String(iv.note || '').slice(0, 200),
+        Math.max(0, num(b.investment.valueCny)),
+        Math.max(0, num(b.investment.investedCny)),
+        now,
+        String(b.investment.note || '').slice(0, 200),
       );
     }
-
   })();
 
   res.json(buildSnapshot(month));
@@ -408,44 +574,17 @@ api.post('/snapshot/:month/confirm', wrap(async (req, res) => {
   res.json(buildSnapshot(month));
 }));
 
-/* ---------------- 理财同步 ---------------- */
-
-api.post('/snapshot/:month/sync', wrap(async (req, res) => {
+/** 用内置持仓重算本月理财（相当于旧版的「同步」，现在纯本地计算） */
+api.post('/snapshot/:month/recalc', wrap(async (req, res) => {
   const month = String(req.params.month);
   if (!isMonth(month)) throw fail('月份格式须为 YYYY-MM');
-  const result = await syncPortfolio(month);
-  const now = new Date().toISOString();
-
-  db.prepare(
-    `INSERT INTO investments (month, value_cny, invested_cny, source, detail, synced_at, note)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(month) DO UPDATE SET value_cny = excluded.value_cny, invested_cny = excluded.invested_cny,
-       source = excluded.source, detail = excluded.detail, synced_at = excluded.synced_at`,
-  ).run(
-    month,
-    Math.max(0, result.valueCny),
-    Math.max(0, result.investedCny),
-    result.mode,
-    JSON.stringify(result.detail.slice(0, 50)),
-    now,
-    '',
-  );
-
-  res.json({
-    ...result,
-    syncedAt: now,
-    snapshot: buildSnapshot(month),
-  });
-}));
-
-api.post('/config/test', wrap(async (req, res) => {
-  const b = req.body || {};
-  const override = {};
-  if (b.portfolio_mode) override.portfolio_mode = b.portfolio_mode;
-  if (b.portfolio_base_url !== undefined) override.portfolio_base_url = b.portfolio_base_url;
-  if (b.portfolio_password) override.portfolio_password = b.portfolio_password;
-  if (b.portfolio_db_path !== undefined) override.portfolio_db_path = b.portfolio_db_path;
-  res.json(await testConnection(override));
+  const cfg = getConfig();
+  const fx = fxFor(month, cfg);
+  const auto = investmentForMonth(month, fx);
+  if (!auto.hasPortfolios) throw fail('还没有任何投资组合，请先在「持仓」页添加');
+  if (!auto.detail.length) throw fail(`所有组合在 ${month} 及之前都没有月度记录`);
+  cacheInvestment(month, fx);
+  res.json({ ...auto, month, snapshot: buildSnapshot(month) });
 }));
 
 /* ---------------- 趋势 ---------------- */
@@ -458,7 +597,6 @@ api.get('/trend', wrap(async (req, res) => {
   const withChanges = rows.map((r, i) => ({ ...r, change: withChange(r, i > 0 ? rows[i - 1] : null) }));
   const trimmed = withChanges.slice(-limit);
 
-  // 连续缺失的月份（两次记录之间超过 1 个月）
   const gaps = [];
   for (let i = 1; i < months.length; i += 1) {
     const [py, pm] = months[i - 1].split('-').map(Number);
@@ -472,7 +610,7 @@ api.get('/trend', wrap(async (req, res) => {
     months,
     gaps,
     latest: trimmed.length ? trimmed[trimmed.length - 1] : null,
-    currentMonth: thisMonth(),
+    currentMonth: todayMonth(),
     fx: { usd: cfg.fx_usd_cny, hkd: cfg.fx_hkd_cny, source: cfg.fx_source },
   });
 }));
@@ -481,24 +619,11 @@ api.get('/trend', wrap(async (req, res) => {
 
 api.get('/config', wrap(async (_req, res) => {
   const cfg = getConfig();
-  const s = getSettings();
-  const envOverride = {
-    portfolio_mode: Boolean(process.env.PORTFOLIO_MODE),
-    portfolio_base_url: Boolean(process.env.PORTFOLIO_BASE_URL),
-    portfolio_password: Boolean(process.env.PORTFOLIO_PASSWORD),
-    portfolio_db_path: Boolean(process.env.PORTFOLIO_DB),
-  };
   res.json({
     fx_usd_cny: cfg.fx_usd_cny,
     fx_hkd_cny: cfg.fx_hkd_cny,
     fx_source: cfg.fx_source,
-    portfolio_mode: cfg.portfolio_mode,
-    portfolio_base_url: cfg.portfolio_base_url,
-    portfolio_db_path: cfg.portfolio_db_path,
-    has_portfolio_password: Boolean(cfg.portfolio_password),
-    password_hint: cfg.portfolio_password ? '••••••••' : '',
-    envOverride,
-    hasStoredPassword: Boolean(s.portfolio_password),
+    envOverride: { fx: Boolean(process.env.FX_USD_CNY || process.env.FX_HKD_CNY) },
     version: process.env.APP_VERSION || '',
   });
 }));
@@ -517,15 +642,6 @@ api.patch('/config', wrap(async (req, res) => {
     if (!Number.isFinite(v) || v <= 0) throw fail('港币汇率须为正数');
     patch.fx_hkd_cny = v.toFixed(4);
   }
-  if (b.portfolio_mode !== undefined) {
-    patch.portfolio_mode = ['manual', 'api', 'db'].includes(b.portfolio_mode) ? b.portfolio_mode : 'manual';
-  }
-  if (b.portfolio_base_url !== undefined) patch.portfolio_base_url = String(b.portfolio_base_url || '').trim().slice(0, 200);
-  if (b.portfolio_db_path !== undefined) patch.portfolio_db_path = String(b.portfolio_db_path || '').trim().slice(0, 300);
-  if (b.portfolio_password !== undefined && b.portfolio_password !== '') {
-    patch.portfolio_password = String(b.portfolio_password).slice(0, 200);
-  }
-  if (b.clear_portfolio_password) patch.portfolio_password = '';
   setSettings(patch);
   res.json({ ok: true });
 }));
@@ -544,11 +660,13 @@ api.post('/fx/refresh', wrap(async (_req, res) => {
 api.get('/export', wrap(async (_req, res) => {
   res.json({
     app: 'monthly-balance-sheet',
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     accounts: db.prepare('SELECT * FROM accounts ORDER BY sort_order, id').all(),
     entries: db.prepare('SELECT * FROM entries ORDER BY month, account_id').all(),
     liabilities: db.prepare('SELECT * FROM liabilities ORDER BY month, id').all(),
+    portfolios: db.prepare('SELECT * FROM portfolios ORDER BY sort_order, id').all(),
+    portfolioRecords: db.prepare('SELECT * FROM portfolio_records ORDER BY portfolio_id, month').all(),
     investments: db.prepare('SELECT * FROM investments ORDER BY month').all(),
     snapshots: db.prepare('SELECT * FROM snapshots ORDER BY month').all(),
   });
@@ -562,12 +680,22 @@ api.post('/import', wrap(async (req, res) => {
   }
   const mode = b.mode === 'replace' ? 'replace' : 'merge';
   const now = new Date().toISOString();
-  let counts = { accounts: 0, entries: 0, liabilities: 0, investments: 0, snapshots: 0 };
+  const counts = {
+    accounts: 0,
+    entries: 0,
+    liabilities: 0,
+    portfolios: 0,
+    portfolioRecords: 0,
+    investments: 0,
+    snapshots: 0,
+  };
 
   db.transaction(() => {
     if (mode === 'replace') {
       db.prepare('DELETE FROM entries').run();
       db.prepare('DELETE FROM liabilities').run();
+      db.prepare('DELETE FROM portfolio_records').run();
+      db.prepare('DELETE FROM portfolios').run();
       db.prepare('DELETE FROM investments').run();
       db.prepare('DELETE FROM snapshots').run();
       db.prepare('DELETE FROM accounts').run();
@@ -617,6 +745,35 @@ api.post('/import', wrap(async (req, res) => {
       );
       counts.liabilities += 1;
     }
+
+    // 投资组合 + 组合记录（兼容旧 portfolio-tracker 备份的字段名）
+    const insPf = db.prepare(
+      'INSERT INTO portfolios (name, allocation, dca_plan, currency, sort_order, archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    );
+    const pfMap = new Map();
+    for (const p of data.portfolios || []) {
+      const name = String(p.name || '').trim();
+      if (!name) continue;
+      const info = insPf.run(
+        name.slice(0, 60),
+        String(p.allocation ?? p.allocation_detail ?? '').slice(0, 200),
+        String(p.dca_plan ?? p.dcaPlan ?? '').slice(0, 200),
+        CURRENCIES.includes(p.currency) ? p.currency : 'USD',
+        num(p.sort_order ?? p.sortOrder, 0),
+        p.archived ? 1 : 0,
+        p.created_at || now,
+      );
+      pfMap.set(Number(p.id), Number(info.lastInsertRowid));
+      counts.portfolios += 1;
+    }
+    const recs = data.portfolioRecords || data.portfolio_records || data.records || [];
+    for (const r of recs) {
+      const pid = pfMap.get(Number(r.portfolio_id ?? r.portfolioId));
+      if (!pid || !isMonth(r.month)) continue;
+      upsertRecord({ portfolioId: pid, month: r.month, invested: num(r.invested), value: num(r.value), note: r.note });
+      counts.portfolioRecords += 1;
+    }
+
     const insInv = db.prepare(
       `INSERT INTO investments (month, value_cny, invested_cny, source, detail, synced_at, note) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(month) DO UPDATE SET value_cny = excluded.value_cny, invested_cny = excluded.invested_cny,
@@ -628,7 +785,7 @@ api.post('/import', wrap(async (req, res) => {
         v.month,
         num(v.value_cny),
         num(v.invested_cny),
-        ['manual', 'api', 'db'].includes(v.source) ? v.source : 'manual',
+        ['manual', 'portfolio'].includes(v.source) ? v.source : 'manual',
         typeof v.detail === 'string' ? v.detail : JSON.stringify(v.detail || []),
         v.synced_at || now,
         v.note || '',

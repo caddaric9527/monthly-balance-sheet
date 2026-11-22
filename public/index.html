@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101828">
   <title>月度资产负债表</title>
-  <link rel="stylesheet" href="/style.css?v=20261122">
+  <link rel="stylesheet" href="/style.css?v=20261122b">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232e6be6'/><text x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='sans-serif'>¥</text></svg>">
 </head>
 <body>
@@ -14,7 +14,7 @@
       <span class="logo">¥</span>
       <div>
         <h1>月度资产负债表</h1>
-        <p class="brand-sub">月末一次录入 · 理财自动同步</p>
+        <p class="brand-sub">现金 · 理财持仓 · 负债，一本账</p>
       </div>
     </div>
     <div class="actions">
@@ -27,6 +27,7 @@
 
   <nav class="tabs" id="tabs">
     <button data-tab="overview" class="active">概览</button>
+    <button data-tab="portfolio">持仓</button>
     <button data-tab="entry">月末录入</button>
     <button data-tab="history">历史</button>
     <button data-tab="settings">设置</button>
@@ -34,6 +35,7 @@
 
   <main>
     <section id="view-overview" class="view active"></section>
+    <section id="view-portfolio" class="view"></section>
     <section id="view-entry" class="view"></section>
     <section id="view-history" class="view"></section>
     <section id="view-settings" class="view"></section>
@@ -42,6 +44,6 @@
   <div class="toast-wrap" id="toastWrap"></div>
   <div class="modal-mask" id="modalMask"></div>
 
-  <script src="/app.js?v=20261122" type="module"></script>
+  <script src="/app.js?v=20261122b" type="module"></script>
 </body>
 </html>

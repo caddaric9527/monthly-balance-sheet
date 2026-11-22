@@ -19,6 +19,8 @@ const short = (v) => {
   return n(v).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
 };
 const signed = (v) => `${n(v) > 0 ? '+' : n(v) < 0 ? '-' : ''}${money(Math.abs(n(v)))}`;
+const signedCur = (v, cur = 'CNY') =>
+  `${n(v) > 0 ? '+' : n(v) < 0 ? '-' : ''}${curMoney(Math.abs(n(v)), cur)}`;
 const pctText = (v) => (isNum(v) ? `${n(v) > 0 ? '+' : ''}${n(v).toFixed(2)}%` : '—');
 const tone = (v) => (!isNum(v) || Math.abs(n(v)) < 0.005 ? 'flat' : n(v) > 0 ? 'up' : 'down');
 const deltaTag = (v, d = 2, moneyMode = true) => {
@@ -42,6 +44,8 @@ const SERIES = {
   cash: { label: '现金', color: '#0f9d8f' },
   invest: { label: '理财', color: '#e08a1e' },
   liabilities: { label: '总负债', color: '#d92f2f' },
+  invValue: { label: '持仓市值', color: '#e08a1e' },
+  invCost: { label: '投入成本', color: '#98a2b3' },
 };
 
 /* ================= 请求 ================= */
@@ -127,6 +131,9 @@ const state = {
   entry: null, // { month, cash[], liabilities[], investment, note, confirmed, fx, meta }
   entryDirty: false,
   settingsDraft: null,
+  pf: null, // 持仓总览 { portfolios, trend, summary, fx }
+  pfSeries: 'invValue',
+  pfSel: null, // 记录明细里选中的组合 id
 };
 
 const KIND_ORDER = Object.keys(KIND);
@@ -294,7 +301,7 @@ function renderOverview() {
       <div class="panel"><div class="empty" style="padding:56px 24px">
         <span class="emoji">🧾</span>
         <div class="title">还没有任何月度记录</div>
-        <div>每月月底花三分钟：填现金余额、点一下同步理财，就能看到净资产曲线。</div>
+        <div>每月月底花三分钟：填现金余额、录持仓市值，就能看到净资产曲线。</div>
         <div style="margin-top:18px"><button class="btn primary" data-act="goto-entry">立即录入第一份月报</button></div>
       </div></div>`;
     return;
@@ -363,10 +370,9 @@ function renderOverview() {
       <div class="panel-head">
         <h2>资产走势 <span class="hint">共 ${t.months.length} 个月记录</span></h2>
         <div class="seg" id="seriesSeg">
-          ${Object.entries(SERIES)
+          ${['net', 'assets', 'cash', 'invest', 'liabilities']
             .map(
-              ([k, v]) =>
-                `<button data-series="${k}" class="${k === state.chartKey ? 'active' : ''}">${v.label}</button>`,
+              (k) => `<button data-series="${k}" class="${k === state.chartKey ? 'active' : ''}">${SERIES[k].label}</button>`,
             )
             .join('')}
         </div>
@@ -418,14 +424,14 @@ function renderOverview() {
       <div class="panel-head">
         <h2>理财持仓明细</h2>
         <span class="hint">${
-          inv?.source === 'db'
-            ? '来自 portfolio-tracker（数据库直读）'
-            : inv?.source === 'api'
-              ? '来自 portfolio-tracker（接口同步）'
-              : inv?.source === 'manual'
-                ? '手动填写'
-                : '未录入'
-        }${inv?.syncedAt ? ` · 同步于 ${new Date(inv.syncedAt).toLocaleString('zh-CN', { hour12: false })}` : ''}</span>
+          inv?.source === 'portfolio'
+            ? '来自「持仓」页的组合记录，自动折算'
+            : inv?.source === 'manual'
+              ? '手动填写'
+              : '未录入'
+        }${inv?.partial ? ' · 部分组合沿用了更早月份' : ''}${
+          inv?.syncedAt ? ` · 计算于 ${new Date(inv.syncedAt).toLocaleString('zh-CN', { hour12: false })}` : ''
+        }</span>
       </div>
       <div class="table-wrap">
         ${
@@ -455,7 +461,7 @@ function renderOverview() {
                     <td class="r mono ${tone(tot.investReturnPct)}">${pctText(tot.investReturnPct)}</td>
                   </tr>
                 </tbody></table>`
-            : `<div class="empty">还没有理财持仓明细。<br/>在「设置」里连上 portfolio-tracker 后，每月点击同步即可自动带入。</div>`
+            : `<div class="empty">还没有理财持仓明细。<br/>到「持仓」页添加投资组合、录入月度市值，这里就会自动折算出当月理财金额。</div>`
         }
       </div>
     </section>
@@ -592,9 +598,9 @@ function renderEntry() {
   }
   const totals = entryTotals();
   const filled = e.cash.filter((c) => c.saved).length;
-  const mode = state.config?.portfolio_mode || 'manual';
-  const modeText = { manual: '手动填写', api: '接口同步', db: '数据库直读' }[mode] || mode;
   const inv = e.investment;
+  const auto = inv.source === 'portfolio' && (inv.detail || []).length > 0;
+  const pfCount = state.pf?.portfolios?.length || 0;
 
   el.innerHTML = `
     <div class="entry-head">
@@ -668,19 +674,21 @@ function renderEntry() {
 
     <section class="panel">
       <div class="panel-head">
-        <h2>② 理财市值 <span class="hint">来自投资组合收益统计</span></h2>
+        <h2>② 理财市值 <span class="hint">由「持仓」页的组合记录自动折算</span></h2>
         <div class="inline">
-          <span class="chip ${mode === 'manual' ? 'gray' : 'purple'}">${modeText}</span>
           ${
-            mode !== 'manual'
-              ? `<button class="btn small primary" data-act="sync-invest">同步本月理财</button>`
-              : `<button class="btn small" data-act="goto-settings">连接 portfolio-tracker</button>`
+            auto
+              ? `<span class="chip purple">自动计算</span><button class="btn small" data-act="recalc-invest">重新计算</button>`
+              : pfCount
+                ? `<span class="chip gray">本月没有可用的组合记录</span><button class="btn small primary" data-act="goto-portfolio">去录入持仓</button>`
+                : `<span class="chip gray">还没添加投资组合</span><button class="btn small primary" data-act="goto-portfolio">添加组合</button>`
           }
+          <button class="btn small" data-act="goto-portfolio">管理持仓</button>
         </div>
       </div>
       <div class="panel-body">
         ${
-          inv.detail?.length
+          auto
             ? `<div class="table-wrap" style="margin:-16px -18px 12px">
                 <table>
                   <thead><tr><th>组合</th><th>币种</th><th>记录月</th><th class="r">市值</th><th class="r">成本</th><th class="r">折人民币</th></tr></thead>
@@ -695,25 +703,31 @@ function renderEntry() {
                         <td class="r mono">${money(d.valueCny)}</td>
                       </tr>`,
                     )
-                    .join('')}</tbody>
+                    .join('')}
+                    <tr class="total-row">
+                      <td colspan="5">理财合计（折人民币）</td>
+                      <td class="r mono">${money(inv.valueCny)}</td>
+                    </tr>
+                  </tbody>
                 </table>
+              </div>
+              <div class="inline" style="justify-content:space-between;flex-wrap:wrap;gap:10px">
+                <div class="small muted">成本 ${money(inv.investedCny)} · 浮动盈亏 <span class="${tone(n(inv.valueCny) - n(inv.investedCny))}">${signed(n(inv.valueCny) - n(inv.investedCny))}</span></div>
+                <div class="small muted">保存月报时会把当前汇率锁定到这个月</div>
               </div>`
-            : ''
+            : `<div class="row-2">
+                <div class="field" style="margin-bottom:0">
+                  <label>理财市值（人民币）</label>
+                  <input class="money" type="number" step="0.01" id="invValue" value="${inv.valueCny || ''}" placeholder="0.00">
+                  <div class="help">${inv.manual ? '当前是手动填写的固定值' : '没有组合记录时才需要手填；有组合记录会自动计算'}</div>
+                </div>
+                <div class="field" style="margin-bottom:0">
+                  <label>投入成本（人民币，选填）</label>
+                  <input class="money" type="number" step="0.01" id="invInvested" value="${inv.investedCny || ''}" placeholder="0.00">
+                  <div class="help">用于计算持仓收益率</div>
+                </div>
+              </div>`
         }
-        <div class="row-2">
-          <div class="field" style="margin-bottom:0">
-            <label>理财市值（人民币）</label>
-            <input class="money" type="number" step="0.01" id="invValue" value="${inv.valueCny || ''}" placeholder="0.00">
-            <div class="help">${
-              inv.source ? `当前来源：${modeText}${inv.syncedAt ? `，同步于 ${new Date(inv.syncedAt).toLocaleString('zh-CN', { hour12: false })}` : ''}` : '手动填写，或者连接 portfolio-tracker 自动同步'
-            }</div>
-          </div>
-          <div class="field" style="margin-bottom:0">
-            <label>投入成本（人民币，选填）</label>
-            <input class="money" type="number" step="0.01" id="invInvested" value="${inv.investedCny || ''}" placeholder="0.00">
-            <div class="help">用于计算持仓收益率，同步时会自动带入</div>
-          </div>
-        </div>
       </div>
     </section>
 
@@ -881,57 +895,423 @@ function renderHistory() {
     </section>`;
 }
 
+/* ================= 持仓 ================= */
+async function afterPortfolioChange() {
+  await refreshAll({ keepEntry: true });
+  if (state.view === 'portfolio') renderPortfolio();
+  if (state.view === 'settings') renderSettings();
+  if (state.view === 'overview') renderOverview();
+}
+
+function renderPortfolio() {
+  const el = $('#view-portfolio');
+  const pf = state.pf;
+  ro.disconnect();
+  chartRegistry.clear();
+  if (!el) return;
+  if (!pf) {
+    el.innerHTML = '<div class="panel"><div class="empty">加载中…</div></div>';
+    return;
+  }
+  const list = pf.portfolios || [];
+  const s = pf.summary || {};
+  if (!list.length) {
+    el.innerHTML = `
+      <div class="panel"><div class="empty" style="padding:56px 24px">
+        <span class="emoji">📈</span>
+        <div class="title">还没有投资组合</div>
+        <div>基金、股票、ETF、加密… 每类资产建一个组合，每月月底录一次市值。<br/>月末月报里的「理财市值」就会自动按当月汇率折算进来。</div>
+        <div style="margin-top:18px"><button class="btn primary" data-act="add-portfolio">＋ 添加第一个组合</button></div>
+      </div></div>`;
+    return;
+  }
+
+  const sel = list.find((p) => p.id === state.pfSel) || list[0];
+  state.pfSel = sel.id;
+  const rows = sel.history ? [...sel.history].reverse() : [];
+  const chartRows = (pf.trend || []).map((r) => ({ month: r.month, invValue: r.value, invCost: r.invested }));
+  const retTone = tone(s.returnPct);
+
+  el.innerHTML = `
+    <div class="kpis">
+      <div class="kpi hero">
+        <div class="k-label">持仓市值 <span style="opacity:.7">· 折人民币</span></div>
+        <div class="k-value">${money(s.value)}</div>
+        <div class="k-sub">
+          <span style="opacity:.75">${s.latestMonth ? monthLabel(s.latestMonth) : '暂无记录'}</span>
+          <span style="opacity:.75">· ${n(s.recorded)}/${n(s.portfolioCount)} 个组合有记录</span>
+        </div>
+      </div>
+      <div class="kpi">
+        <div class="k-label"><span class="dot" style="background:#98a2b3"></span>投入成本</div>
+        <div class="k-value">${money(s.invested)}</div>
+        <div class="k-sub">累计 ${n(s.months)} 个月记录</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label"><span class="dot" style="background:#d92f2f"></span>浮动盈亏</div>
+        <div class="k-value ${retTone}">${signed(s.gain)}</div>
+        <div class="k-sub">本月 ${signed(s.monthPnl)} · 本月投入 ${money(s.monthInvested)}</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label"><span class="dot" style="background:#e08a1e"></span>累计收益率</div>
+        <div class="k-value ${retTone}">${pctText(s.returnPct)}</div>
+        <div class="k-sub">市值 ÷ 成本 − 1</div>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>投资组合 <span class="hint">共 ${list.length} 个</span></h2>
+        <div class="inline">
+          <button class="btn small" data-act="bulk-record" data-month="${todayMonth()}">批量录入本月</button>
+          <button class="btn small primary" data-act="add-portfolio">＋ 新增组合</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>组合</th><th>币种</th><th>最近记录</th>
+            <th class="r">市值（原币）</th><th class="r">成本（原币）</th>
+            <th class="r">折人民币</th><th class="r">收益率</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${list
+              .map((p) => {
+                const l = p.latest;
+                return `<tr>
+                  <td>
+                    <b>${esc(p.name)}</b>
+                    ${p.allocation ? `<div class="muted small">${esc(p.allocation)}</div>` : ''}
+                  </td>
+                  <td><span class="chip gray">${esc(p.currency)}</span></td>
+                  <td class="muted">${l ? esc(l.month) : '<span class="chip outline">未录入</span>'}</td>
+                  <td class="r mono">${l ? curMoney(l.value, p.currency) : '—'}</td>
+                  <td class="r mono muted">${l ? curMoney(l.invested, p.currency) : '—'}</td>
+                  <td class="r mono">${l ? money(l.valueCny) : '—'}</td>
+                  <td class="r mono ${tone(l?.returnPct)}">${l ? pctText(l.returnPct) : '—'}</td>
+                  <td class="r" style="white-space:nowrap">
+                    <button class="btn-link" data-act="add-record" data-id="${p.id}">录入</button>
+                    <button class="btn-link" data-act="edit-portfolio" data-id="${p.id}">编辑</button>
+                    <button class="btn-link danger" data-act="del-portfolio" data-id="${p.id}">删除</button>
+                  </td>
+                </tr>`;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body" style="border-top:1px solid var(--border);padding-top:10px">
+        <div class="small muted">折人民币按「设置」里的汇率换算；每个月的月报会锁定当月汇率，历史金额不随汇率漂移。</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>收益走势</h2>
+        <div class="seg" id="pfSeg">
+          <button data-pf="invValue" class="${state.pfSeries === 'invValue' ? 'active' : ''}">持仓市值</button>
+          <button data-pf="invCost" class="${state.pfSeries === 'invCost' ? 'active' : ''}">投入成本</button>
+        </div>
+      </div>
+      <div class="panel-body" style="padding:8px 12px 4px"><div id="pfChart"></div></div>
+      <div class="stats">
+        <div class="s"><div class="l">最高市值</div><div class="v">${pf.trend?.length ? money(Math.max(...pf.trend.map((r) => n(r.value)))) : '—'}</div></div>
+        <div class="s"><div class="l">最高收益率</div><div class="v">${pf.trend?.length ? pctText(Math.max(...pf.trend.map((r) => n(r.returnPct)))) : '—'}</div></div>
+        <div class="s"><div class="l">累计投入</div><div class="v">${money(s.invested)}</div></div>
+        <div class="s"><div class="l">累计盈亏</div><div class="v ${retTone}">${signed(s.gain)}</div></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>月度记录 <span class="hint">${esc(sel.name)} · ${sel.recordCount} 条</span></h2>
+        <div class="inline" style="flex-wrap:wrap">
+          <select id="pfPicker" style="width:auto;min-width:150px">
+            ${list.map((p) => `<option value="${p.id}" ${p.id === sel.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
+          <button class="btn small primary" data-act="add-record" data-id="${sel.id}">＋ 录入市值</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        ${rows.length
+          ? `<table>
+              <thead><tr>
+                <th>月份</th><th class="r">投入本金</th><th class="r">市值</th>
+                <th class="r">当月投入</th><th class="r">当月盈亏</th><th class="r">累计收益率</th><th>备注</th><th></th>
+              </tr></thead>
+              <tbody>
+                ${rows
+                  .map(
+                    (r) => `<tr>
+                      <td><b>${esc(r.month)}</b></td>
+                      <td class="r mono muted">${curMoney(r.invested, sel.currency)}</td>
+                      <td class="r mono">${curMoney(r.value, sel.currency)}</td>
+                      <td class="r mono">${signedCur(r.monthInvested, sel.currency)}</td>
+                      <td class="r mono ${tone(r.monthPnl)}">${signedCur(r.monthPnl, sel.currency)}</td>
+                      <td class="r mono ${tone(r.returnPct)}">${pctText(r.returnPct)}</td>
+                      <td class="muted small">${esc(r.note || '')}</td>
+                      <td class="r"><button class="btn-link danger" data-act="del-record" data-id="${r.id}">删除</button></td>
+                    </tr>`,
+                  )
+                  .join('')}
+              </tbody>
+            </table>`
+          : `<div class="empty">这个组合还没有月度记录，点右上角「录入市值」开始。</div>`}
+      </div>
+    </section>`;
+
+  if (chartRows.length) mountChart($('#pfChart'), chartRows, state.pfSeries, SERIES[state.pfSeries].color);
+  else $('#pfChart').innerHTML = '<div class="empty">还没有足够的数据画图</div>';
+}
+
+/* ---- 组合弹窗 ---- */
+function portfolioModal(p) {
+  const isEdit = Boolean(p);
+  const d = p || { name: '', currency: 'USD', allocation: '', dcaPlan: '' };
+  openModal(
+    `<div class="modal-head">
+      <h3>${isEdit ? '编辑组合' : '新增投资组合'}</h3>
+      <p>一个组合 = 一类资产，比如「纳指ETF」「A股主动基金」「比特币」</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>组合名称</label>
+        <input type="text" id="pfName" value="${esc(d.name)}" placeholder="如 全球股票ETF" maxlength="60" autofocus>
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label>计价币种</label>
+          <select id="pfCur">
+            ${['USD', 'CNY', 'HKD'].map((c) => `<option value="${c}" ${d.currency === c ? 'selected' : ''}>${c}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>定投计划（选填）</label>
+          <input type="text" id="pfDca" value="${esc(d.dcaPlan || '')}" placeholder="如 每月 3000" maxlength="200">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>配置说明（选填）</label>
+        <input type="text" id="pfAlloc" value="${esc(d.allocation || '')}" placeholder="如 60% VOO + 40% QQQ" maxlength="200">
+      </div>
+    </div>
+    <div class="modal-foot split">
+      <span></span>
+      <div class="inline">
+        <button class="btn" data-cancel>取消</button>
+        <button class="btn primary" data-ok>${isEdit ? '保存' : '添加'}</button>
+      </div>
+    </div>`,
+    (m) => {
+      const nameEl = m.querySelector('#pfName');
+      setTimeout(() => nameEl.focus(), 30);
+      m.querySelector('[data-cancel]').onclick = closeModal;
+      const submit = async () => {
+        const payload = {
+          name: nameEl.value.trim(),
+          currency: m.querySelector('#pfCur').value,
+          dcaPlan: m.querySelector('#pfDca').value.trim(),
+          allocation: m.querySelector('#pfAlloc').value.trim(),
+        };
+        if (!payload.name) return toast('请填组合名称', 'err');
+        try {
+          if (isEdit) await api(`/portfolios/${p.id}`, { method: 'PATCH', body: payload });
+          else await api('/portfolios', { method: 'POST', body: payload });
+          closeModal();
+          toast(isEdit ? '组合已更新' : '组合已添加', 'ok');
+          await afterPortfolioChange();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      };
+      m.querySelector('[data-ok]').onclick = submit;
+      nameEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submit();
+      });
+    },
+  );
+}
+
+/* ---- 单条记录弹窗 ---- */
+function recordModal(p, month) {
+  if (!p) return toast('请先选择组合', 'err');
+  const last = p.latest;
+  const defMonth = month || todayMonth();
+  openModal(
+    `<div class="modal-head">
+      <h3>录入月度市值 · ${esc(p.name)}</h3>
+      <p>${esc(p.currency)} 计价。填月底的市值和累计投入本金，收益率会自动算。</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>月份</label>
+        <input type="month" id="recMonth" value="${defMonth}">
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label>投入本金（累计）</label>
+          <input class="money" type="number" step="0.01" id="recInvested" value="${last ? last.invested : ''}" placeholder="0.00">
+          <div class="help">${last ? `上月记录：${curMoney(last.invested, p.currency)}` : '第一次录入就填累计投入'}</div>
+        </div>
+        <div class="field">
+          <label>当前市值</label>
+          <input class="money" type="number" step="0.01" id="recValue" value="${last ? last.value : ''}" placeholder="0.00">
+          <div class="help" id="recPreview">${last ? `上月市值：${curMoney(last.value, p.currency)}` : ''}</div>
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>备注（选填）</label>
+        <input type="text" id="recNote" placeholder="如 追加 3000 / 分红再投" maxlength="200">
+      </div>
+    </div>
+    <div class="modal-foot split">
+      <span class="muted small">同一个月重复提交会覆盖</span>
+      <div class="inline">
+        <button class="btn" data-cancel>取消</button>
+        <button class="btn primary" data-ok>保存</button>
+      </div>
+    </div>`,
+    (m) => {
+      m.querySelector('[data-cancel]').onclick = closeModal;
+      const invEl = m.querySelector('#recInvested');
+      const valEl = m.querySelector('#recValue');
+      const prev = m.querySelector('#recPreview');
+      const calc = () => {
+        const iv = Number(invEl.value) || 0;
+        const v = Number(valEl.value) || 0;
+        if (!iv) {
+          prev.textContent = '';
+          return;
+        }
+        const pct = ((v - iv) / iv) * 100;
+        prev.innerHTML = `收益率 <b class="${tone(pct)}">${pctText(pct)}</b> · 盈亏 ${signedCur(v - iv, p.currency)}`;
+      };
+      invEl.addEventListener('input', calc);
+      valEl.addEventListener('input', calc);
+      const submit = async () => {
+        try {
+          await api(`/portfolios/${p.id}/records`, {
+            method: 'POST',
+            body: {
+              month: m.querySelector('#recMonth').value,
+              invested: Number(invEl.value) || 0,
+              value: Number(valEl.value) || 0,
+              note: m.querySelector('#recNote').value.trim(),
+            },
+          });
+          closeModal();
+          toast('市值已记录', 'ok');
+          await afterPortfolioChange();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      };
+      m.querySelector('[data-ok]').onclick = submit;
+      setTimeout(() => valEl.focus(), 40);
+    },
+  );
+}
+
+/* ---- 批量录入弹窗 ---- */
+function bulkRecordModal(month) {
+  const list = state.pf?.portfolios || [];
+  if (!list.length) return toast('先添加投资组合', 'err');
+  const defMonth = month || todayMonth();
+  openModal(
+    `<div class="modal-head">
+      <h3>批量录入 ${defMonth}</h3>
+      <p>一次填完所有组合的市值。留空表示这个月不给该组合记账（会自动沿用最近月份）。</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>月份</label>
+        <input type="month" id="bulkMonth" value="${defMonth}">
+      </div>
+      <div class="table-wrap" style="margin:0 -4px">
+        <table>
+          <thead><tr><th>组合</th><th class="r" style="width:130px">投入本金</th><th class="r" style="width:130px">市值</th></tr></thead>
+          <tbody>
+            ${list
+              .map((p) => {
+                const l = p.latest;
+                return `<tr>
+                  <td>${esc(p.name)} <span class="chip gray">${esc(p.currency)}</span></td>
+                  <td><input class="money" type="number" step="0.01" data-bulk-invested="${p.id}" value="${l ? l.invested : ''}" placeholder="0.00"></td>
+                  <td><input class="money" type="number" step="0.01" data-bulk-value="${p.id}" value="${l ? l.value : ''}" placeholder="0.00"></td>
+                </tr>`;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-foot split">
+      <span class="muted small">只保存填了数字的组合</span>
+      <div class="inline">
+        <button class="btn" data-cancel>取消</button>
+        <button class="btn primary" data-ok>全部保存</button>
+      </div>
+    </div>`,
+    (m) => {
+      m.querySelector('[data-cancel]').onclick = closeModal;
+      const submit = async () => {
+        const records = [];
+        for (const p of list) {
+          const iv = m.querySelector(`[data-bulk-invested="${p.id}"]`).value;
+          const v = m.querySelector(`[data-bulk-value="${p.id}"]`).value;
+          if (iv === '' && v === '') continue;
+          records.push({ portfolioId: p.id, invested: Number(iv) || 0, value: Number(v) || 0 });
+        }
+        if (!records.length) return toast('至少填一个组合的市值', 'err');
+        try {
+          const res = await api('/records/bulk', {
+            method: 'POST',
+            body: { month: m.querySelector('#bulkMonth').value, records },
+          });
+          closeModal();
+          toast(`已保存 ${res.saved} 个组合的市值`, 'ok');
+          await afterPortfolioChange();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      };
+      m.querySelector('[data-ok]').onclick = submit;
+    },
+  );
+}
+
 /* ================= 设置 ================= */
 function renderSettings() {
   const el = $('#view-settings');
   const cfg = state.config || {};
-  const mode = cfg.portfolio_mode || 'manual';
+  const summary = state.pf?.summary;
   el.innerHTML = `
     <div class="settings-grid">
       <section class="panel">
-        <div class="panel-head"><h2>理财数据源</h2><span class="hint">portfolio-tracker</span></div>
+        <div class="panel-head"><h2>理财持仓</h2><span class="hint">已内置，无需外部服务</span></div>
         <div class="panel-body">
-          <div class="notice">理财部分不用重复录入：每月点一次「同步」，就会把投资组合收益统计里各组合的市值折算成人民币带进来。</div>
-          <div class="radio-cards" id="modeCards">
-            ${[
-              ['manual', '手动填写', '不连接，自己填市值'],
-              ['db', '数据库直读', '同机部署，读它的 SQLite'],
-              ['api', '接口同步', '通过 HTTP 接口读取'],
-            ]
-              .map(
-                ([k, t, d]) => `<button class="radio-card ${mode === k ? 'active' : ''}" data-mode="${k}">
-                  <div class="t">${t}</div><div class="d">${d}</div></button>`,
-              )
-              .join('')}
-          </div>
-
-          <div id="modeFields" style="margin-top:14px">
-            <div class="field" data-for="db">
-              <label>数据库文件路径</label>
-              <input type="text" id="cfgDbPath" value="${esc(cfg.portfolio_db_path || '')}" placeholder="/data/portfolio/portfolio.db">
-              <div class="help">Docker 部署时把对方的 data 目录只读挂载进来，例如 <code>-v /path/portfolio/data:/data/portfolio:ro</code>${
-                cfg.envOverride?.portfolio_db_path ? '（当前被环境变量 PORTFOLIO_DB 覆盖）' : ''
-              }</div>
+          <div class="notice ok">投资组合管理已并入本项目：组合、月度市值、收益率都存这同一个 SQLite，不用再单独跑 portfolio-tracker，也不需要填数据库路径或接口地址。</div>
+          <div class="kpis" style="grid-template-columns:repeat(3,1fr);margin:14px 0 2px">
+            <div class="kpi">
+              <div class="k-label">组合数</div>
+              <div class="k-value">${n(summary?.portfolioCount)}</div>
+              <div class="k-sub">已录入 ${n(summary?.recorded)} 个</div>
             </div>
-            <div class="field" data-for="api">
-              <label>服务地址</label>
-              <input type="text" id="cfgBaseUrl" value="${esc(cfg.portfolio_base_url || '')}" placeholder="http://192.168.1.10:8888">
-              <div class="help">${
-                cfg.envOverride?.portfolio_base_url ? '当前被环境变量 PORTFOLIO_BASE_URL 覆盖。' : ''
-              }同机部署可填 http://127.0.0.1:8888</div>
+            <div class="kpi">
+              <div class="k-label">持仓市值</div>
+              <div class="k-value">${money(summary?.value)}</div>
+              <div class="k-sub">${summary?.latestMonth ? monthLabel(summary.latestMonth) : '暂无记录'}</div>
             </div>
-            <div class="field" data-for="api">
-              <label>访问密码</label>
-              <input type="password" id="cfgPassword" value="" placeholder="${cfg.has_portfolio_password ? '已保存，留空表示不修改' : 'portfolio-tracker 的登录密码'}">
-              <div class="help">${cfg.envOverride?.portfolio_password ? '当前被环境变量 PORTFOLIO_PASSWORD 覆盖。' : '只存在本机的数据库里，不会外传'}</div>
+            <div class="kpi">
+              <div class="k-label">累计收益率</div>
+              <div class="k-value ${tone(summary?.returnPct)}">${pctText(summary?.returnPct)}</div>
+              <div class="k-sub">浮动盈亏 ${signed(summary?.gain)}</div>
             </div>
           </div>
-
-          <div class="inline" style="margin-top:6px">
-            <button class="btn primary" data-act="save-portfolio">保存配置</button>
-            <button class="btn" data-act="test-portfolio">测试连接</button>
+          <div class="inline" style="margin-top:14px">
+            <button class="btn primary" data-act="goto-portfolio">管理持仓</button>
+            <button class="btn" data-act="add-portfolio">＋ 新增组合</button>
           </div>
-          <div id="testResult" style="margin-top:10px"></div>
         </div>
       </section>
 
@@ -956,7 +1336,7 @@ function renderSettings() {
             <button class="btn" data-act="refresh-fx">立即刷新汇率</button>
             <button class="btn primary" data-act="save-fx">保存</button>
           </div>
-          <div class="help" style="margin-top:8px">每个月的汇率会在保存时记录一次，历史月份的人民币金额不会因为汇率变化而漂移。</div>
+          <div class="help" style="margin-top:8px">每个月的汇率会在保存月报时记录一次，历史月份的人民币金额不会因为汇率变化而漂移。</div>
         </div>
       </section>
     </div>
@@ -969,7 +1349,7 @@ function renderSettings() {
             <button class="btn" data-act="export">导出 JSON</button>
             <label class="btn" style="cursor:pointer">导入 JSON<input type="file" id="importFile" accept="application/json,.json" hidden></label>
           </div>
-          <div class="help" style="margin-top:8px">建议每月导出一次存到自己电脑里。导入默认合并，同月份会被覆盖。</div>
+          <div class="help" style="margin-top:8px">备份包含现金账户、月报、负债、投资组合与组合记录。建议每月导出一次存到自己电脑里。</div>
         </div>
       </section>
 
@@ -978,29 +1358,27 @@ function renderSettings() {
         <div class="panel-body">
           <div class="small" style="line-height:1.9">
             <div>月度资产负债表 <span class="chip gray">v${esc(cfg.version || 'dev')}</span></div>
-            <div class="muted">理财数据来自同系列项目「投资组合收益统计」。</div>
+            <div class="muted">投资组合收益统计（原 portfolio-tracker）已合并进本项目。</div>
             <div class="muted">所有数据存在本机 SQLite，不上传任何服务器。</div>
           </div>
         </div>
       </section>
     </div>`;
-
-  syncModeFields(mode);
-}
-
-function syncModeFields(mode) {
-  $$('#modeFields [data-for]').forEach((f) => {
-    f.hidden = f.dataset.for !== mode;
-  });
 }
 
 /* ================= 视图切换 & 数据加载 ================= */
 async function refreshAll({ keepEntry = false } = {}) {
-  const [monthsRes, trendRes, cfgRes] = await Promise.all([api('/months'), api('/trend?limit=48'), api('/config')]);
+  const [monthsRes, trendRes, cfgRes, pfRes] = await Promise.all([
+    api('/months'),
+    api('/trend?limit=48'),
+    api('/config'),
+    api('/portfolios'),
+  ]);
   state.months = monthsRes.months.map((m) => m.month);
   state.monthRows = monthsRes.months;
   state.trend = trendRes;
   state.config = cfgRes;
+  state.pf = pfRes;
 
   if (!state.ovMonth || !state.months.includes(state.ovMonth)) {
     state.ovMonth = state.months.length ? state.months[state.months.length - 1] : null;
@@ -1025,6 +1403,7 @@ function showView(name) {
   $$('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   if (name === 'overview') renderOverview();
+  if (name === 'portfolio') renderPortfolio();
   if (name === 'history') renderHistory();
   if (name === 'settings') renderSettings();
   if (name === 'entry') {
@@ -1133,10 +1512,10 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
-  const modeCard = e.target.closest('#modeCards .radio-card');
-  if (modeCard) {
-    $$('#modeCards .radio-card').forEach((c) => c.classList.toggle('active', c === modeCard));
-    syncModeFields(modeCard.dataset.mode);
+  const pfSeg = e.target.closest('#pfSeg button');
+  if (pfSeg) {
+    state.pfSeries = pfSeg.dataset.pf;
+    renderPortfolio();
     return;
   }
 
@@ -1204,31 +1583,26 @@ document.addEventListener('click', async (e) => {
       refreshEntryNumbers();
       return;
     }
-    if (act === 'sync-invest') {
+    if (act === 'recalc-invest') {
       el.disabled = true;
-      el.textContent = '同步中…';
+      el.textContent = '计算中…';
       try {
-        const res = await api(`/snapshot/${state.entry.month}/sync`, { method: 'POST' });
+        const res = await api(`/snapshot/${state.entry.month}/recalc`, { method: 'POST' });
         state.entry.investment = { ...res.snapshot.investment };
         await refreshAll({ keepEntry: true });
         renderEntry();
         if (res.partial) {
-          toast(`已同步 ${res.detail.length} 个组合（部分组合沿用了更早月份的数据）`, 'ok');
+          toast(`已按 ${res.detail.length} 个组合重算（部分组合沿用了更早月份的数据）`, 'ok');
         } else {
-          toast(`已同步 ${res.detail.length} 个组合，理财市值 ${money(res.valueCny)}`, 'ok');
+          toast(`已按 ${res.detail.length} 个组合重算，理财市值 ${money(res.valueCny)}`, 'ok');
         }
         if (res.warnings?.length) toast(res.warnings[0], 'err');
       } catch (err) {
         toast(err.message, 'err');
-      } finally {
-        const btn = $('[data-act="sync-invest"]');
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = '同步本月理财';
-        }
       }
       return;
     }
+    if (act === 'goto-portfolio') return showView('portfolio');
     if (act === 'save') return saveEntry();
     if (act === 'toggle-confirm') {
       const target = !state.entry.confirmed;
@@ -1251,36 +1625,42 @@ document.addEventListener('click', async (e) => {
       toast('已删除', 'ok');
       return;
     }
-    if (act === 'save-portfolio') {
-      const active = $('#modeCards .radio-card.active')?.dataset.mode || 'manual';
-      const body = {
-        portfolio_mode: active,
-        portfolio_base_url: $('#cfgBaseUrl')?.value ?? undefined,
-        portfolio_db_path: $('#cfgDbPath')?.value ?? undefined,
-      };
-      const pw = $('#cfgPassword')?.value;
-      if (pw) body.portfolio_password = pw;
-      await api('/config', { method: 'PATCH', body });
-      await refreshAll({ keepEntry: true });
-      state.config = await api('/config');
-      renderSettings();
-      toast('理财数据源配置已保存', 'ok');
+    if (act === 'add-portfolio') return portfolioModal(null);
+    if (act === 'edit-portfolio') {
+      const p = state.pf?.portfolios?.find((x) => x.id === Number(el.dataset.id));
+      return portfolioModal(p || null);
+    }
+    if (act === 'del-portfolio') {
+      const p = state.pf?.portfolios?.find((x) => x.id === Number(el.dataset.id));
+      if (!p) return;
+      const ok = await confirmBox({
+        title: `删除组合「${p.name}」？`,
+        text: `它的 ${p.recordCount} 条月度记录会一起删掉，历史月报里的理财金额会跟着重新计算。`,
+        okText: '删除',
+        danger: true,
+      });
+      if (!ok) return;
+      await api(`/portfolios/${p.id}?purge=1`, { method: 'DELETE' });
+      await afterPortfolioChange();
+      toast('组合已删除', 'ok');
       return;
     }
-    if (act === 'test-portfolio') {
-      const active = $('#modeCards .radio-card.active')?.dataset.mode || 'manual';
-      const box = $('#testResult');
-      box.innerHTML = '<span class="muted small">测试中…</span>';
-      const res = await api('/config/test', {
-        method: 'POST',
-        body: {
-          portfolio_mode: active,
-          portfolio_base_url: $('#cfgBaseUrl')?.value || '',
-          portfolio_db_path: $('#cfgDbPath')?.value || '',
-          portfolio_password: $('#cfgPassword')?.value || '',
-        },
-      });
-      box.innerHTML = `<div class="notice ${res.ok ? 'ok' : 'warn'}">${res.ok ? '✓' : '✗'} ${esc(res.message)}</div>`;
+    if (act === 'add-record') {
+      const p = state.pf?.portfolios?.find((x) => x.id === Number(el.dataset.id));
+      return recordModal(p || null, el.dataset.month);
+    }
+    if (act === 'del-record') {
+      const ok = await confirmBox({ title: '删除这条持仓记录？', text: '删除后该月的理财金额会重新计算。', okText: '删除', danger: true });
+      if (!ok) return;
+      await api(`/records/${el.dataset.id}`, { method: 'DELETE' });
+      await afterPortfolioChange();
+      toast('记录已删除', 'ok');
+      return;
+    }
+    if (act === 'bulk-record') return bulkRecordModal(el.dataset.month || todayMonth());
+    if (act === 'select-pf') {
+      state.pfSel = Number(el.dataset.id);
+      renderPortfolio();
       return;
     }
     if (act === 'save-fx') {
@@ -1427,7 +1807,7 @@ document.addEventListener('change', async (e) => {
     if (state.authRequired) $('#btnLogout').hidden = false;
     await refreshAll();
     const initial = location.hash.slice(1);
-    showView(['overview', 'entry', 'history', 'settings'].includes(initial) ? initial : 'overview');
+    showView(['overview', 'portfolio', 'entry', 'history', 'settings'].includes(initial) ? initial : 'overview');
   } catch (e) {
     if (e.message !== '未登录') toast(e.message, 'err');
   }

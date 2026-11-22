@@ -1,25 +1,17 @@
 services:
   balance:
-    image: monthly-balance-sheet:2026.11.22
+    image: monthly-balance-sheet:2.0.0
     build: .
     container_name: balance
     restart: unless-stopped
     ports:
       - "${HOST_PORT:-8899}:8080"
     volumes:
-      - ./data:/app/data                 # 本站 SQLite 数据
-      # 想用「数据库直读」方式同步理财时，把 portfolio-tracker 的 data 目录只读挂进来：
-      # - ../portfolio-tracker/data:/portfolio-data:ro
-      # 然后在设置里把数据库路径填 /portfolio-data/portfolio.db
+      - ./data:/app/data                 # 现金、负债、投资组合全部存在这里
     environment:
       - TZ=Asia/Shanghai
       - PORT=8080
       - AUTH_PASSWORD=${AUTH_PASSWORD:-}
       - AUTH_DAYS=${AUTH_DAYS:-30}
-      # 理财数据源：manual / api / db
-      - PORTFOLIO_MODE=${PORTFOLIO_MODE:-manual}
-      # api 模式用
-      - PORTFOLIO_BASE_URL=${PORTFOLIO_BASE_URL:-}
-      - PORTFOLIO_PASSWORD=${PORTFOLIO_PASSWORD:-}
-      # db 模式用（容器内路径）
-      - PORTFOLIO_DB=${PORTFOLIO_DB:-}
+      - FX_USD_CNY=${FX_USD_CNY:-}
+      - FX_HKD_CNY=${FX_HKD_CNY:-}

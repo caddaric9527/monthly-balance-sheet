@@ -1,5 +1,5 @@
 /**
- * 无依赖冒烟测试：起一个临时实例，走完「建账户 → 录月报 → 汇总 → 同步报错 → 删除」全流程。
+ * 无依赖冒烟测试：起一个临时实例，走完「建账户 → 录月报 → 建组合 → 录市值 → 自动折算 → 删除」全流程。
  * 用法：node scripts/smoke.mjs
  */
 import { spawn } from 'node:child_process';
@@ -39,7 +39,7 @@ const call = async (p, method = 'GET', body) => {
 const main = async () => {
   const server = spawn(process.execPath, ['server/index.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(PORT), DATA_DIR, AUTH_PASSWORD: PASSWORD, PORTFOLIO_MODE: 'manual' },
+    env: { ...process.env, PORT: String(PORT), DATA_DIR, AUTH_PASSWORD: PASSWORD },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   server.stderr.on('data', (d) => process.env.SMOKE_VERBOSE && process.stderr.write(d));
@@ -122,9 +122,34 @@ const main = async () => {
     const months = await call('/months');
     ok('月份列表按升序', months.data.months.map((m) => m.month).join(',') === '2026-01,2026-02');
 
-    console.log('理财同步：手动模式下应报错');
-    const sync = await call('/snapshot/2026-02/sync', 'POST');
-    ok('手动模式同步返回 400', sync.status === 400, `实际 ${sync.status}`);
+    console.log('内置持仓：录入市值后自动折算');
+    const pf = await call('/portfolios', 'POST', { name: '纳指ETF', currency: 'USD', allocation: 'QQQ 100%' });
+    ok('创建投资组合', pf.status === 201);
+    const rec = await call(`/portfolios/${pf.data.id}/records`, 'POST', {
+      month: '2026-02',
+      invested: 1000,
+      value: 1200,
+    });
+    ok('录入组合月度记录', rec.status === 201);
+    const snapFeb = await call('/snapshot/2026-02');
+    ok('理财自动折算 = 1200×7 = 8400', snapFeb.data.totals.invest === 8400, `实际 ${snapFeb.data.totals.invest}`);
+    ok('来源标记为 portfolio', snapFeb.data.investment.source === 'portfolio', snapFeb.data.investment.source);
+    ok('组合明细带折人民币金额', snapFeb.data.investment.detail[0].valueCny === 8400);
+
+    const ov = await call('/portfolios');
+    ok('持仓总览含 1 个组合', ov.data.portfolios.length === 1);
+    ok('总览市值 = 8400', ov.data.summary.value === 8400, `实际 ${ov.data.summary.value}`);
+    ok('收益率 = 20%', ov.data.summary.returnPct === 20, `实际 ${ov.data.summary.returnPct}`);
+
+    const recalc = await call('/snapshot/2026-02/recalc', 'POST');
+    ok('重算接口返回市值 8400', recalc.status === 200 && recalc.data.valueCny === 8400);
+
+    const mar = await call('/snapshot/2026-03');
+    ok('无记录月份沿用最近月份', mar.data.investment.detail[0].exact === false);
+    ok('沿用后理财仍为 8400', mar.data.totals.invest === 8400, `实际 ${mar.data.totals.invest}`);
+
+    const badRec = await call(`/portfolios/${pf.data.id}/records`, 'POST', { month: '2026-04', invested: -1, value: 1 });
+    ok('负的投入本金返回 400', badRec.status === 400);
 
     console.log('接口校验');
     const badMonth = await call('/snapshot/2026-13');
