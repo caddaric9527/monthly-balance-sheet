@@ -171,6 +171,16 @@ const main = async () => {
     console.log('静态页面');
     const page = await fetch(`${BASE}/`, { headers: { Cookie: cookie, Accept: 'text/html' } });
     ok('首页返回 200', page.status === 200);
+
+    // 未登录时登录页自身要能拿到样式，否则页面会裸奔
+    const loginPage = await fetch(`${BASE}/login`, { headers: { Accept: 'text/html' }, redirect: 'manual' });
+    ok('登录页返回 200', loginPage.status === 200);
+    for (const asset of ['/style.css', '/login.css']) {
+      const r = await fetch(`${BASE}${asset}`);
+      ok(`未登录可取 ${asset}`, r.status === 200 && (r.headers.get('content-type') || '').includes('css'));
+    }
+    const guarded = await fetch(`${BASE}/app.js`);
+    ok('未登录仍拦截 app.js', guarded.status === 401);
   } finally {
     server.kill();
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
