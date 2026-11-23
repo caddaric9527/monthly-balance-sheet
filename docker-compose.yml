@@ -1,6 +1,6 @@
 services:
   balance:
-    image: monthly-balance-sheet:${APP_VERSION:-2.0.0}
+    image: monthly-balance-sheet:${APP_VERSION:-2.0.1}
     build:
       context: .
       args:

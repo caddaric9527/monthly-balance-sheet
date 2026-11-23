@@ -339,23 +339,6 @@ input.month-input:focus { background: #fff; border-color: var(--primary); }
 .toast.ok { background: #0f766e; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
-/* ---------------- 登录页 ---------------- */
-.login-body { display: grid; place-items: center; min-height: 100vh; background: radial-gradient(1000px 500px at 50% -10%, #e8f0ff, #f6f8fb 60%); padding: 20px; }
-.login-card {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 18px; padding: 30px 28px;
-  width: 100%; max-width: 360px; box-shadow: 0 24px 60px -24px rgba(16,24,40,.28); text-align: center;
-}
-.login-logo {
-  width: 46px; height: 46px; border-radius: 13px; margin: 0 auto 14px; display: grid; place-items: center;
-  background: linear-gradient(135deg, #3b7bf0, #1d4ed8); color: #fff; font-size: 22px; font-weight: 700;
-  box-shadow: 0 8px 20px -8px rgba(46,107,230,.8);
-}
-.login-card h1 { font-size: 17px; font-weight: 650; margin-bottom: 4px; }
-.login-card p.muted { font-size: 12.5px; margin-bottom: 18px; }
-.login-card input { margin-bottom: 12px; text-align: center; padding: 10px; }
-.login-err { color: var(--debt); font-size: 12.5px; margin-top: 10px; }
-.login-foot { position: fixed; bottom: 22px; font-size: 11.5px; }
-
 /* ---------------- 响应式 ---------------- */
 @media (max-width: 980px) {
   .kpis { grid-template-columns: 1fr 1fr; }

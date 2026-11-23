@@ -30,6 +30,14 @@ app.get(['/login', '/login.html'], (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'login.html'));
 });
 
+// 样式表要放在鉴权之前：登录页本身也需要它，否则未登录时页面会没有样式
+for (const file of ['style.css', 'login.css']) {
+  app.get(`/${file}`, (_req, res) => {
+    res.set('Cache-Control', 'no-cache');
+    res.sendFile(path.join(PUBLIC_DIR, file));
+  });
+}
+
 // 公开鉴权接口
 app.use('/api', authRouter);
 

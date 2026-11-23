@@ -3,45 +3,177 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
   <title>登录 · 月度资产负债表</title>
-  <link rel="stylesheet" href="/style.css?v=20261122">
+  <link rel="stylesheet" href="/style.css?v=20261124">
+  <link rel="stylesheet" href="/login.css?v=20261124">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232e6be6'/><text x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='sans-serif'>¥</text></svg>">
 </head>
-<body class="login-body">
-  <form class="login-card" id="loginForm">
-    <div class="login-logo">¥</div>
-    <h1>月度资产负债表</h1>
-    <p class="muted">输入访问密码后查看你的资产负债数据</p>
-    <input type="password" id="password" placeholder="访问密码" autocomplete="current-password" autofocus>
-    <button class="btn primary block" type="submit" id="loginBtn">进入</button>
-    <p class="login-err" id="loginErr" hidden></p>
-  </form>
-  <p class="login-foot muted">数据只存在你自己的服务器上</p>
+<body class="auth-body">
+  <main class="auth-shell">
+    <!-- 左侧：品牌与产品说明 -->
+    <section class="auth-brand">
+      <span class="brand-eyebrow"><i></i>私有部署</span>
+      <div class="brand-mark">¥</div>
+      <h1>月度资产负债表</h1>
+      <p class="brand-lead">每月月底一次录入，把现金、理财持仓和负债合成一张净资产表。</p>
+
+      <ul class="brand-points">
+        <li>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M8.5 12.5l2.3 2.3 4.7-5"></path></svg>
+          <span>现金按「钱放在哪儿」分账户，多币种自动折算</span>
+        </li>
+        <li>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M8.5 12.5l2.3 2.3 4.7-5"></path></svg>
+          <span>理财组合内置，市值随月度记录自动进表</span>
+        </li>
+        <li>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M8.5 12.5l2.3 2.3 4.7-5"></path></svg>
+          <span>净资产走势、资产结构、环比变化一屏看完</span>
+        </li>
+      </ul>
+
+      <div class="brand-chart" aria-hidden="true">
+        <svg viewBox="0 0 380 96" fill="none">
+          <defs>
+            <linearGradient id="cFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#ffffff" stop-opacity=".26"/>
+              <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+            </linearGradient>
+            <linearGradient id="cLine" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#a8ccff"/>
+              <stop offset="100%" stop-color="#ffffff"/>
+            </linearGradient>
+          </defs>
+          <path d="M0 96h376" stroke="rgba(255,255,255,.16)" stroke-dasharray="3 5"/>
+          <path d="M0 74C30 70 44 58 70 56c26-2 38 8 64 2s38-24 64-28 38 6 64 2 38-18 64-22 46 2 60-2V96H0Z" fill="url(#cFill)"/>
+          <path d="M0 74C30 70 44 58 70 56c26-2 38 8 64 2s38-24 64-28 38 6 64 2 38-18 64-22 46 2 60-2" stroke="url(#cLine)" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="70" cy="56" r="3.2" fill="#fff" fill-opacity=".55"/>
+          <circle cx="262" cy="32" r="3.2" fill="#fff" fill-opacity=".55"/>
+          <circle cx="375" cy="6.4" r="4" fill="#fff"/>
+        </svg>
+      </div>
+
+      <div class="brand-foot">
+        <span>数据只存在你自己的服务器上</span>
+        <strong>Self-hosted</strong>
+      </div>
+    </section>
+
+    <!-- 右侧：登录表单 -->
+    <section class="auth-panel">
+      <h2>输入访问密码</h2>
+      <p class="panel-sub">这台实例已开启密码保护，验证后即可查看资产数据。</p>
+
+      <form class="auth-form" id="loginForm" novalidate>
+        <label class="auth-label" for="password">访问密码</label>
+        <div class="auth-field">
+          <svg class="auth-field-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10" rx="2.5"></rect><path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"></path></svg>
+          <input type="password" id="password" name="password" placeholder="请输入访问密码" autocomplete="current-password" autofocus spellcheck="false">
+          <button type="button" class="auth-eye" id="togglePw" aria-label="显示密码" title="显示密码">
+            <svg id="eyeOn" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            <svg id="eyeOff" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M4 4l16 16"></path><path d="M9.6 5.9A9.7 9.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3.2 3.9"></path><path d="M6.2 7.6A17 17 0 0 0 2.5 12S6 18.5 12 18.5a9.6 9.6 0 0 0 3.4-.6"></path><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"></path></svg>
+          </button>
+        </div>
+        <p class="auth-caps" id="capsHint" hidden>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l7 8h-4v6H9v-6H5l7-8Z"></path></svg>
+          大写锁定已开启
+        </p>
+
+        <div class="auth-row">
+          <label class="auth-check"><input type="checkbox" checked disabled> 保持登录 30 天</label>
+          <span class="auth-hint">忘记密码见部署目录 .env</span>
+        </div>
+
+        <button class="auth-submit" type="submit" id="loginBtn">
+          <span id="btnLabel">进入</span>
+        </button>
+
+        <div class="auth-alert" id="loginErr" role="alert" aria-live="polite" hidden>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v5"></path><path d="M12 16.2v.2"></path></svg>
+          <span id="errText"></span>
+        </div>
+      </form>
+
+      <p class="auth-panel-foot">密码验证通过后会写入一个签名 Cookie，30 天内无需重复输入。数据文件位于服务器的 <code>data/balance.db</code>。</p>
+    </section>
+  </main>
 
   <script>
     const form = document.getElementById('loginForm');
-    const err = document.getElementById('loginErr');
+    const input = document.getElementById('password');
     const btn = document.getElementById('loginBtn');
+    const btnLabel = document.getElementById('btnLabel');
+    const errBox = document.getElementById('loginErr');
+    const errText = document.getElementById('errText');
+    const caps = document.getElementById('capsHint');
+    const toggle = document.getElementById('togglePw');
+    const eyeOn = document.getElementById('eyeOn');
+    const eyeOff = document.getElementById('eyeOff');
+
+    // 已登录则直接进站
+    fetch('/api/session')
+      .then((r) => r.json())
+      .then((s) => { if (s && s.authed) location.replace('/'); })
+      .catch(() => {});
+
+    toggle.addEventListener('click', () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      eyeOn.hidden = show;
+      eyeOff.hidden = !show;
+      toggle.setAttribute('aria-label', show ? '隐藏密码' : '显示密码');
+      toggle.title = show ? '隐藏密码' : '显示密码';
+      input.focus();
+    });
+
+    input.addEventListener('keyup', (e) => {
+      if (typeof e.getModifierState === 'function') {
+        caps.hidden = !e.getModifierState('CapsLock');
+      }
+    });
+    input.addEventListener('blur', () => { caps.hidden = true; });
+    input.addEventListener('input', () => {
+      errBox.hidden = true;
+      btn.classList.remove('is-error');
+    });
+
+    function showError(msg) {
+      errText.textContent = msg;
+      errBox.hidden = false;
+      btnLabel.textContent = '重新验证';
+    }
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      err.hidden = true;
+      const password = input.value;
+      if (!password) {
+        showError('请输入访问密码');
+        input.focus();
+        return;
+      }
+
+      errBox.hidden = true;
       btn.disabled = true;
-      btn.textContent = '验证中…';
+      btnLabel.textContent = '验证中…';
+      btn.insertAdjacentHTML('afterbegin', '<span class="spinner" aria-hidden="true"></span>');
+
       try {
         const res = await fetch('/api/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: document.getElementById('password').value }),
+          body: JSON.stringify({ password }),
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || '登录失败');
+        if (!res.ok) throw new Error(data.error || '登录失败，请重试');
+        btnLabel.textContent = '已验证，正在进入…';
         location.replace('/');
-      } catch (e2) {
-        err.textContent = e2.message;
-        err.hidden = false;
+      } catch (err) {
+        document.querySelector('.spinner')?.remove();
         btn.disabled = false;
-        btn.textContent = '进入';
+        btnLabel.textContent = '进入';
+        showError(err.message || '网络异常，请检查服务是否在线');
+        input.select();
       }
     });
   </script>
