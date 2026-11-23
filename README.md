@@ -65,12 +65,19 @@ AUTH_PASSWORD=你的密码 PORT=8899 npm start
 
 ### 从旧的 portfolio-tracker 迁数据
 
+两种来源都支持：旧应用的 SQLite 库，或它「设置 → 导出」下载的 JSON 备份。
+
 ```bash
-# 只读旧库，写入本项目的 data/balance.db
+# 旧数据库（只读，不改动它）
 node scripts/import-legacy.mjs ../portfolio-tracker/data/portfolio.db
+
+# 旧 JSON 备份
+node scripts/import-legacy.mjs ~/Downloads/portfolio-backup-2026-10-31.json
 ```
 
-导入后打开「持仓」页即可看到；已有月报的理财金额会按内置持仓自动重算。旧库原封不动，可以留着对照。
+也可以直接在新站「设置 → 导入 JSON」选那个备份文件：识别到是 portfolio-tracker 的备份时，**只恢复组合与月度记录**，不碰现金账户、负债和月报；同名组合自动合并，不会把净值算成两倍。
+
+导入后打开「持仓」页即可看到；已有月报的理财金额会按内置持仓自动重算。旧数据原封不动，可以留着对照。
 
 ## 数据模型
 
@@ -115,7 +122,8 @@ snapshots           每月元信息：备注、是否月末确认、当月汇率
 
 - 界面「设置 → 导出 JSON」下载全量数据（现金、月报、负债、组合、组合记录）。
 - 或直接备份 `data/balance.db`（连同 `-wal`、`-shm`，或先停容器）。
-- 导入默认合并，同月份会覆盖。
+- 导入默认合并：账户按「名称 + 币种」、组合按「名称」匹配已有记录，重复导入不会翻倍；同月份记录以文件为准。
+- 也能导入旧 portfolio-tracker 的 JSON 备份（只恢复组合与记录）。
 
 ## 安全说明
 

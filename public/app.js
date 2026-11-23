@@ -99,7 +99,7 @@ function openModal(html, onMount) {
 function confirmBox({ title, text, okText = '确定', danger = false }) {
   return new Promise((resolve) => {
     openModal(
-      `<div class="modal-head"><h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ''}</div>
+      `<div class="modal-head"><h3>${esc(title)}</h3>${text ? `<p>${esc(text).replace(/\n/g, '<br>')}</p>` : ''}</div>
        <div class="modal-foot">
          <button class="btn" data-cancel>取消</button>
          <button class="btn ${danger ? 'danger-fill' : 'primary'}" data-ok>${esc(okText)}</button>
@@ -1349,7 +1349,7 @@ function renderSettings() {
             <button class="btn" data-act="export">导出 JSON</button>
             <label class="btn" style="cursor:pointer">导入 JSON<input type="file" id="importFile" accept="application/json,.json" hidden></label>
           </div>
-          <div class="help" style="margin-top:8px">备份包含现金账户、月报、负债、投资组合与组合记录。建议每月导出一次存到自己电脑里。</div>
+          <div class="help" style="margin-top:8px">备份包含现金账户、月报、负债、投资组合与组合记录。建议每月导出一次存到自己电脑里。<br>也支持导入旧 portfolio-tracker 导出的备份 JSON：只恢复组合与月度记录，不动现金、负债与月报。</div>
         </div>
       </section>
 
@@ -1782,17 +1782,33 @@ document.addEventListener('change', async (e) => {
     } catch {
       return toast('文件不是合法的 JSON', 'err');
     }
+    const hasLedger = Array.isArray(parsed.accounts) && Array.isArray(parsed.entries);
+    const recs = parsed.records || parsed.portfolioRecords || parsed.portfolio_records || parsed.month_records || [];
+    const pfOnly = !hasLedger && (Array.isArray(parsed.portfolios) || recs.length > 0);
+    if (!hasLedger && !pfOnly) {
+      return toast('无法识别的备份：既不是本应用的备份，也不是 portfolio-tracker 的备份', 'err');
+    }
     const ok = await confirmBox({
-      title: '导入备份？',
-      text: `将从 ${file.name} 合并导入，同月份的记录会被覆盖。`,
+      title: pfOnly ? '导入 portfolio-tracker 备份？' : '导入备份？',
+      text: pfOnly
+        ? `检测到 portfolio-tracker 备份：${(parsed.portfolios || []).length} 个组合、${recs.length} 条月度记录。\n将合并导入，不影响已有的现金账户、负债与月报；同名组合自动合并，同月份记录会被覆盖。`
+        : `将从 ${file.name} 合并导入，同月份的记录会被覆盖。`,
       okText: '导入',
     });
     if (!ok) return;
     try {
       const res = await api('/import', { method: 'POST', body: { data: parsed, mode: 'merge' } });
       await refreshAll();
-      showView('history');
-      toast(`导入完成：${res.accounts} 个账户、${res.entries} 条余额`, 'ok');
+      if (res.portfolioOnly) {
+        showView('portfolio');
+        toast(
+          `已导入 ${res.portfolios} 个组合、${res.portfolioRecords} 条月度记录${res.portfoliosReused ? `（${res.portfoliosReused} 个同名组合已合并）` : ''}`,
+          'ok',
+        );
+      } else {
+        showView('history');
+        toast(`导入完成：${res.accounts} 个账户、${res.entries} 条余额`, 'ok');
+      }
     } catch (err) {
       toast(err.message, 'err');
     }

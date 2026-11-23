@@ -162,6 +162,36 @@ const main = async () => {
     ok('导出包含 2 条月度余额 × 2 账户', exp.data.entries.length === 4, `实际 ${exp.data.entries.length}`);
     const imp = await call('/import', 'POST', { data: exp.data, mode: 'merge' });
     ok('导入备份成功', imp.status === 200 && imp.data.entries === 4);
+    ok('重复导入不新增账户（按名称合并）', imp.data.accounts === 0 && imp.data.accountsReused === 2,
+      `新建 ${imp.data.accounts} / 复用 ${imp.data.accountsReused}`);
+
+    console.log('兼容旧 portfolio-tracker 备份');
+    const legacyBackup = {
+      version: 2,
+      exportedAt: '2026-10-31T15:00:00.000Z',
+      portfolios: [
+        { id: 1, name: '组合一', currency: 'USD', allocation: 'VOO 60/QQQ 40', dca_plan: '', sort_order: 0 },
+        { id: 2, name: '组合二', currency: 'CNY', allocation: '', dca_plan: '', sort_order: 1 },
+      ],
+      records: [
+        { id: 1, portfolio_id: 1, month: '2026-09', invested: 1000, value: 1100, note: '' },
+        { id: 2, portfolio_id: 1, month: '2026-10', invested: 1200, value: 1300, note: '' },
+        { id: 3, portfolio_id: 2, month: '2026-10', invested: 5000, value: 4800, note: '回撤' },
+      ],
+    };
+    const legacyImp = await call('/import', 'POST', { data: legacyBackup, mode: 'merge' });
+    ok('旧备份可导入（仅组合）', legacyImp.status === 200 && legacyImp.data.portfolioOnly === true);
+    ok('导入 2 个组合 + 3 条记录',
+      legacyImp.data.portfolios === 2 && legacyImp.data.portfolioRecords === 3,
+      `实际 ${legacyImp.data.portfolios}/${legacyImp.data.portfolioRecords}`);
+    ok('未动现金账户（仍 2 个）', (await call('/accounts')).data.length === 2);
+    const legacyAgain = await call('/import', 'POST', { data: legacyBackup, mode: 'merge' });
+    ok('重复导入合并同名组合', legacyAgain.data.portfolios === 0 && legacyAgain.data.portfoliosReused === 2,
+      `新建 ${legacyAgain.data.portfolios} / 复用 ${legacyAgain.data.portfoliosReused}`);
+    const pfAfter = await call('/portfolios');
+    ok('组合总数仍为 3（1 内置 + 2 导入）', pfAfter.data.portfolios.length === 3, `实际 ${pfAfter.data.portfolios.length}`);
+    const weird = await call('/import', 'POST', { data: { foo: 1 }, mode: 'merge' });
+    ok('无法识别的备份返回 400', weird.status === 400);
 
     console.log('删除月份');
     const del = await call('/snapshot/2026-01', 'DELETE');

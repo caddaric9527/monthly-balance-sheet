@@ -675,16 +675,22 @@ api.get('/export', wrap(async (_req, res) => {
 api.post('/import', wrap(async (req, res) => {
   const b = req.body || {};
   const data = typeof b.data === 'string' ? JSON.parse(b.data) : b.data || b;
-  if (!Array.isArray(data.accounts) || !Array.isArray(data.entries)) {
-    throw fail('备份格式不正确：缺少 accounts 或 entries');
+  const hasLedger = Array.isArray(data.accounts) && Array.isArray(data.entries);
+  // 旧 portfolio-tracker 的备份只有 portfolios + records（无 accounts/entries），单独兼容
+  const portfolioOnly =
+    !hasLedger && (Array.isArray(data.portfolios) || Array.isArray(data.records) || Array.isArray(data.month_records));
+  if (!hasLedger && !portfolioOnly) {
+    throw fail('备份格式不正确：既不是本应用的备份（缺 accounts/entries），也不是 portfolio-tracker 的备份（缺 portfolios/records）');
   }
   const mode = b.mode === 'replace' ? 'replace' : 'merge';
   const now = new Date().toISOString();
   const counts = {
     accounts: 0,
+    accountsReused: 0,
     entries: 0,
     liabilities: 0,
     portfolios: 0,
+    portfoliosReused: 0,
     portfolioRecords: 0,
     investments: 0,
     snapshots: 0,
@@ -692,25 +698,39 @@ api.post('/import', wrap(async (req, res) => {
 
   db.transaction(() => {
     if (mode === 'replace') {
-      db.prepare('DELETE FROM entries').run();
-      db.prepare('DELETE FROM liabilities').run();
+      // 纯组合备份只清理组合相关表，别把现金账户和月报一起删了
+      if (!portfolioOnly) {
+        db.prepare('DELETE FROM entries').run();
+        db.prepare('DELETE FROM liabilities').run();
+        db.prepare('DELETE FROM investments').run();
+        db.prepare('DELETE FROM snapshots').run();
+        db.prepare('DELETE FROM accounts').run();
+      }
       db.prepare('DELETE FROM portfolio_records').run();
       db.prepare('DELETE FROM portfolios').run();
-      db.prepare('DELETE FROM investments').run();
-      db.prepare('DELETE FROM snapshots').run();
-      db.prepare('DELETE FROM accounts').run();
     }
     const insAcc = db.prepare(
       'INSERT INTO accounts (name, kind, currency, sort_order, archived, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     );
     const idMap = new Map();
-    for (const a of data.accounts) {
+    const findAcc = db.prepare('SELECT id FROM accounts WHERE name = ? AND currency = ? ORDER BY archived, id LIMIT 1');
+    for (const a of data.accounts || []) {
       const name = String(a.name || '').trim();
       if (!name) continue;
+      const currency = CURRENCIES.includes(a.currency) ? a.currency : 'CNY';
+      // 合并模式下同名同币种视为同一个账户，避免重复导入把现金翻倍
+      if (mode !== 'replace') {
+        const hit = findAcc.get(name.slice(0, 40), currency);
+        if (hit) {
+          idMap.set(Number(a.id), Number(hit.id));
+          counts.accountsReused += 1;
+          continue;
+        }
+      }
       const info = insAcc.run(
         name.slice(0, 40),
         KINDS.includes(a.kind) ? a.kind : 'bank',
-        CURRENCIES.includes(a.currency) ? a.currency : 'CNY',
+        currency,
         num(a.sort_order ?? a.sortOrder, 0),
         a.archived ? 1 : 0,
         String(a.note || '').slice(0, 100),
@@ -723,7 +743,7 @@ api.post('/import', wrap(async (req, res) => {
       `INSERT INTO entries (month, account_id, balance) VALUES (?, ?, ?)
        ON CONFLICT(month, account_id) DO UPDATE SET balance = excluded.balance`,
     );
-    for (const e of data.entries) {
+    for (const e of data.entries || []) {
       const aid = idMap.get(Number(e.account_id));
       if (!aid || !isMonth(e.month)) continue;
       upsertEntry.run(e.month, aid, num(e.balance));
@@ -751,9 +771,19 @@ api.post('/import', wrap(async (req, res) => {
       'INSERT INTO portfolios (name, allocation, dca_plan, currency, sort_order, archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     );
     const pfMap = new Map();
+    const findPf = db.prepare('SELECT id, currency FROM portfolios WHERE name = ? ORDER BY archived, id LIMIT 1');
     for (const p of data.portfolios || []) {
       const name = String(p.name || '').trim();
       if (!name) continue;
+      // 合并模式下同名组合视为同一个，避免重复导入把净值算成两倍
+      if (mode !== 'replace') {
+        const hit = findPf.get(name.slice(0, 60));
+        if (hit) {
+          pfMap.set(Number(p.id), Number(hit.id));
+          counts.portfoliosReused += 1;
+          continue;
+        }
+      }
       const info = insPf.run(
         name.slice(0, 60),
         String(p.allocation ?? p.allocation_detail ?? '').slice(0, 200),
@@ -766,12 +796,28 @@ api.post('/import', wrap(async (req, res) => {
       pfMap.set(Number(p.id), Number(info.lastInsertRowid));
       counts.portfolios += 1;
     }
-    const recs = data.portfolioRecords || data.portfolio_records || data.records || [];
+    const recs = data.portfolioRecords || data.portfolio_records || data.records || data.month_records || [];
     for (const r of recs) {
       const pid = pfMap.get(Number(r.portfolio_id ?? r.portfolioId));
       if (!pid || !isMonth(r.month)) continue;
       upsertRecord({ portfolioId: pid, month: r.month, invested: num(r.invested), value: num(r.value), note: r.note });
       counts.portfolioRecords += 1;
+    }
+    // 更早版本的备份会把记录嵌在组合里，一并兼容
+    for (const p of data.portfolios || []) {
+      const pid = pfMap.get(Number(p.id));
+      if (!pid) continue;
+      for (const r of p.records || p.history || []) {
+        if (!isMonth(r.month)) continue;
+        upsertRecord({
+          portfolioId: pid,
+          month: r.month,
+          invested: num(r.invested),
+          value: num(r.value),
+          note: r.note,
+        });
+        counts.portfolioRecords += 1;
+      }
     }
 
     const insInv = db.prepare(
@@ -811,7 +857,7 @@ api.post('/import', wrap(async (req, res) => {
     }
   })();
 
-  res.json({ ok: true, mode, ...counts });
+  res.json({ ok: true, mode, portfolioOnly, ...counts });
 }));
 
 export default api;
